@@ -35,6 +35,11 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.nio.charset.StandardCharsets;
 import team.kitemc.verifymc.registration.RegistrationOutcome;
+import team.kitemc.verifymc.api.handler.RegistrationApiHandler;
+import team.kitemc.verifymc.api.handler.ReviewApiHandler;
+import team.kitemc.verifymc.api.router.AdminRouter;
+import team.kitemc.verifymc.api.router.DiscordRouter;
+import team.kitemc.verifymc.api.router.PublicRouter;
 
 public class WebServer {
     private HttpServer server;
@@ -212,7 +217,7 @@ public class WebServer {
         return String.join(" | ", parts);
     }
 
-    private void debugLog(String msg) {
+    public void debugLog(String msg) {
         if (debug) plugin.getLogger().info("[DEBUG] " + msg);
     }
 
@@ -373,6 +378,9 @@ public class WebServer {
         // Static resources
         server.createContext("/", new StaticHandler(staticDir));
         
+        new PublicRouter().register(server);
+        new AdminRouter().register(server);
+
         // API examples
         server.createContext("/api/ping", exchange -> {
             String resp = "{\"msg\":\"pong\"}";
@@ -495,136 +503,8 @@ public class WebServer {
             sendJson(exchange, resp);
         });
         
-        // /api/discord/auth - Generate Discord OAuth2 authorization URL
-        server.createContext("/api/discord/auth", exchange -> {
-            debugLog("/api/discord/auth called");
-            if (!"POST".equals(exchange.getRequestMethod())) { 
-                exchange.sendResponseHeaders(405, 0); 
-                exchange.close(); 
-                return; 
-            }
-            
-            JSONObject req = new JSONObject(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-            String username = req.optString("username", "");
-            
-            JSONObject resp = new JSONObject();
-            
-            if (!discordService.isEnabled()) {
-                resp.put("success", false);
-                resp.put("msg", "Discord integration is not enabled");
-                sendJson(exchange, resp);
-                return;
-            }
-            
-            if (username.isEmpty()) {
-                resp.put("success", false);
-                resp.put("msg", "Username is required");
-                sendJson(exchange, resp);
-                return;
-            }
-            
-            String authUrl = discordService.generateAuthUrl(username);
-            if (authUrl != null) {
-                resp.put("success", true);
-                resp.put("auth_url", authUrl);
-            } else {
-                resp.put("success", false);
-                resp.put("msg", "Failed to generate auth URL");
-            }
-            
-            sendJson(exchange, resp);
-        });
-        
-        // /api/discord/callback - Handle Discord OAuth2 callback
-        server.createContext("/api/discord/callback", exchange -> {
-            debugLog("/api/discord/callback called");
-            
-            String query = exchange.getRequestURI().getQuery();
-            String code = null;
-            String state = null;
-            
-            if (query != null) {
-                for (String param : query.split("&")) {
-                    String[] keyValue = param.split("=");
-                    if (keyValue.length == 2) {
-                        if ("code".equals(keyValue[0])) {
-                            code = java.net.URLDecoder.decode(keyValue[1], StandardCharsets.UTF_8);
-                        } else if ("state".equals(keyValue[0])) {
-                            state = java.net.URLDecoder.decode(keyValue[1], StandardCharsets.UTF_8);
-                        }
-                    }
-                }
-            }
-            
-            // Check Accept header to determine response format
-            String accept = exchange.getRequestHeaders().getFirst("Accept");
-            boolean wantsHtml = accept == null || accept.contains("text/html");
-            
-            if (code == null || state == null) {
-                if (wantsHtml) {
-                    sendDiscordCallbackHtml(exchange, false, "Missing code or state parameter", null);
-                } else {
-                    JSONObject resp = new JSONObject();
-                    resp.put("success", false);
-                    resp.put("msg", "Missing code or state parameter");
-                    sendJson(exchange, resp);
-                }
-                return;
-            }
-            
-            DiscordService.DiscordCallbackResult result = discordService.handleCallback(code, state);
-            
-            if (wantsHtml) {
-                String discordUsername = result.user != null ? 
-                    (result.user.globalName != null ? result.user.globalName : result.user.username) : null;
-                sendDiscordCallbackHtml(exchange, result.success, result.message, discordUsername);
-            } else {
-                sendJson(exchange, result.toJson());
-            }
-        });
-        
-        // /api/discord/status - Check if user has linked Discord
-        server.createContext("/api/discord/status", exchange -> {
-            debugLog("/api/discord/status called");
-            if (!"GET".equals(exchange.getRequestMethod())) { 
-                exchange.sendResponseHeaders(405, 0); 
-                exchange.close(); 
-                return; 
-            }
-            
-            String query = exchange.getRequestURI().getQuery();
-            String username = null;
-            if (query != null && query.contains("username=")) {
-                username = query.split("username=")[1].split("&")[0];
-                try {
-                    username = java.net.URLDecoder.decode(username, StandardCharsets.UTF_8);
-                } catch (Exception e) {
-                    // Keep original value
-                }
-            }
-            
-            JSONObject resp = new JSONObject();
-            
-            if (username == null || username.isEmpty()) {
-                resp.put("success", false);
-                resp.put("msg", "Username is required");
-                sendJson(exchange, resp);
-                return;
-            }
-            
-            resp.put("success", true);
-            resp.put("linked", discordService.isLinked(username));
-            
-            if (discordService.isLinked(username)) {
-                DiscordService.DiscordUser user = discordService.getLinkedUser(username);
-                if (user != null) {
-                    resp.put("user", user.toJson());
-                }
-            }
-            
-            sendJson(exchange, resp);
-        });
-        
+        new DiscordRouter().register(server, this);
+
         // /api/reload-config reload configuration interface - requires authentication
         server.createContext("/api/reload-config", exchange -> {
             if (!"POST".equals(exchange.getRequestMethod())) { 
@@ -978,7 +858,7 @@ public class WebServer {
                 this::isValidUUID,
                 this::debugLog
         );
-        server.createContext("/api/register", new RegistrationHandler(registrationProcessingHandler));
+        server.createContext("/api/register", new RegistrationApiHandler(new RegistrationHandler(registrationProcessingHandler)));
 
         AdminUserOperationHandler adminUserOperationHandler = new AdminUserOperationHandler(plugin, webAuthHelper, this::getMsg);
         
@@ -1022,7 +902,7 @@ public class WebServer {
         }));
         
         // Unified user review interface - requires authentication
-        server.createContext("/api/review", new ReviewHandler(exchange -> {
+        server.createContext("/api/review", new ReviewApiHandler(new ReviewHandler(exchange -> {
             if (!"POST".equals(exchange.getRequestMethod())) { 
                 exchange.sendResponseHeaders(405, 0); 
                 exchange.close(); 
@@ -1130,7 +1010,7 @@ public class WebServer {
                 sendJson(exchange, reviewApplicationService.buildReviewResponse(false, false, key -> getMsg(key, language)));
                 return;
             }
-        }));
+        })));
         
         // Get all users - requires authentication
         server.createContext("/api/all-users", new UserAdminHandler(exchange -> {
@@ -1734,7 +1614,7 @@ public class WebServer {
         }
     }
 
-    private void sendJson(HttpExchange exchange, JSONObject resp) throws IOException {
+    public void sendJson(HttpExchange exchange, JSONObject resp) throws IOException {
         JSONObject withCopy = withCopyright(resp);
         byte[] data = withCopy.toString().getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
@@ -1746,7 +1626,7 @@ public class WebServer {
     /**
      * Send Discord OAuth callback result as an HTML page
      */
-    private void sendDiscordCallbackHtml(HttpExchange exchange, boolean success, String message, String discordUsername) throws IOException {
+    public void sendDiscordCallbackHtml(HttpExchange exchange, boolean success, String message, String discordUsername) throws IOException {
         String serverName = plugin.getConfig().getString("web_server_prefix", "Server");
         String statusIcon = success ? "✓" : "✗";
         String statusColor = success ? "#4ade80" : "#f87171";
@@ -1812,7 +1692,7 @@ public class WebServer {
                    .replace("'", "&#39;");
     }
     
-    private String getMsg(String key, String language) {
+    public String getMsg(String key, String language) {
         // Get or load language resource bundle
         ResourceBundle bundle = getLanguageBundle(language);
         if (bundle != null && bundle.containsKey(key)) {
@@ -1862,6 +1742,11 @@ public class WebServer {
             return messages; // Fallback to default
         }
     }
+
+    public DiscordService getDiscordService() {
+        return discordService;
+    }
+
     private boolean hasScoringServiceFailure(JSONArray details) {
         if (details == null || details.isEmpty()) {
             return false;
