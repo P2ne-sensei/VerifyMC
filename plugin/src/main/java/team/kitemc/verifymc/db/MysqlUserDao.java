@@ -4,6 +4,10 @@ import java.sql.*;
 import java.util.*;
 import org.bukkit.plugin.Plugin;
 import java.util.concurrent.ConcurrentHashMap;
+import team.kitemc.verifymc.domain.user.User;
+import team.kitemc.verifymc.infrastructure.persistence.file.UserEntityMapper;
+
+import java.util.stream.Collectors;
 
 public class MysqlUserDao implements UserDao {
     private final Connection conn;
@@ -741,4 +745,66 @@ public class MysqlUserDao implements UserDao {
         debugLog("Checking if Discord ID is linked: " + discordId);
         return getUserByDiscordId(discordId) != null;
     }
+    @Override
+    public boolean registerUser(User user) {
+        if (user == null) {
+            return false;
+        }
+        return registerUser(
+                user.uuid(),
+                user.username(),
+                user.email(),
+                user.status().value(),
+                user.password(),
+                user.questionnaireAudit().score(),
+                user.questionnaireAudit().passed(),
+                user.questionnaireAudit().reviewSummary(),
+                user.questionnaireAudit().scoredAt());
+    }
+
+    @Override
+    public List<User> getAllUsersTyped() {
+        return getAllUsers().stream().map(UserEntityMapper::toDomain).collect(Collectors.toList());
+    }
+
+    @Override
+    public List<User> getUsersWithPaginationTyped(int page, int pageSize) {
+        return getUsersWithPagination(page, pageSize).stream().map(UserEntityMapper::toDomain).collect(Collectors.toList());
+    }
+
+    @Override
+    public List<User> getUsersWithPaginationAndSearchTyped(int page, int pageSize, String searchQuery) {
+        return getUsersWithPaginationAndSearch(page, pageSize, searchQuery).stream().map(UserEntityMapper::toDomain).collect(Collectors.toList());
+    }
+
+    @Override
+    public List<User> getApprovedUsersWithPaginationTyped(int page, int pageSize) {
+        return getApprovedUsersWithPagination(page, pageSize).stream().map(UserEntityMapper::toDomain).collect(Collectors.toList());
+    }
+
+    @Override
+    public List<User> getApprovedUsersWithPaginationAndSearchTyped(int page, int pageSize, String searchQuery) {
+        return getApprovedUsersWithPaginationAndSearch(page, pageSize, searchQuery).stream().map(UserEntityMapper::toDomain).collect(Collectors.toList());
+    }
+
+    @Override
+    public User getUserByUuidTyped(String uuid) {
+        return UserEntityMapper.toDomain(getUserByUuid(uuid));
+    }
+
+    @Override
+    public User getUserByUsernameTyped(String username) {
+        return UserEntityMapper.toDomain(getUserByUsername(username));
+    }
+
+    @Override
+    public List<User> getPendingUsersTyped() {
+        return getPendingUsers().stream().map(UserEntityMapper::toDomain).collect(Collectors.toList());
+    }
+
+    @Override
+    public User getUserByDiscordIdTyped(String discordId) {
+        return UserEntityMapper.toDomain(getUserByDiscordId(discordId));
+    }
+
 }

@@ -1,192 +1,107 @@
 package team.kitemc.verifymc.db;
 
+import team.kitemc.verifymc.domain.user.QuestionnaireAudit;
+import team.kitemc.verifymc.domain.user.User;
+
 import java.util.List;
 import java.util.Map;
 
 public interface UserDao {
-    /**
-     * Register user (without password)
-     * @param uuid User UUID
-     * @param username Username
-     * @param email Email address
-     * @param status User status
-     * @return true if registration successful
-     */
     boolean registerUser(String uuid, String username, String email, String status);
 
-    /**
-     * Register user (without password) with questionnaire audit data
-     */
     boolean registerUser(String uuid, String username, String email, String status,
                          Integer questionnaireScore, Boolean questionnairePassed,
                          String questionnaireReviewSummary, Long questionnaireScoredAt);
-    
-    /**
-     * Register user (with password)
-     * @param uuid User UUID
-     * @param username Username
-     * @param email Email address
-     * @param status User status
-     * @param password User password
-     * @return true if registration successful
-     */
+
     boolean registerUser(String uuid, String username, String email, String status, String password);
 
-    /**
-     * Register user (with password) with questionnaire audit data
-     */
     boolean registerUser(String uuid, String username, String email, String status, String password,
                          Integer questionnaireScore, Boolean questionnairePassed,
                          String questionnaireReviewSummary, Long questionnaireScoredAt);
-    
-    /**
-     * Update user status
-     * @param uuidOrName User UUID or username
-     * @param status New status
-     * @return true if update successful
-     */
+
+    boolean registerUser(User user);
+
+    default boolean registerUser(User user, QuestionnaireAudit questionnaireAudit) {
+        QuestionnaireAudit audit = questionnaireAudit == null ? user.questionnaireAudit() : questionnaireAudit;
+        return registerUser(
+                user.uuid(),
+                user.username(),
+                user.email(),
+                user.status().value(),
+                user.password(),
+                audit.score(),
+                audit.passed(),
+                audit.reviewSummary(),
+                audit.scoredAt()
+        );
+    }
+
     boolean updateUserStatus(String uuidOrName, String status);
-    
-    /**
-     * Update user password
-     * @param uuidOrName User UUID or username
-     * @param password New password
-     * @return true if update successful
-     */
+
     boolean updateUserPassword(String uuidOrName, String password);
 
-    /**
-     * Update user email
-     * @param uuidOrName User UUID or username
-     * @param email New email
-     * @return true if update successful
-     */
     boolean updateUserEmail(String uuidOrName, String email);
-    
-    /**
-     * Get all users
-     * @return List of all users
-     */
-    List<Map<String, Object>> getAllUsers();
-    
-    /**
-     * Get users with pagination
-     * @param page Page number (starting from 1)
-     * @param pageSize Number of users per page
-     * @return List of users for the specified page
-     */
-    List<Map<String, Object>> getUsersWithPagination(int page, int pageSize);
-    
-    /**
-     * Get total count of all users
-     * @return Total number of users
-     */
+
+    List<User> getAllUsersTyped();
+
+    List<User> getUsersWithPaginationTyped(int page, int pageSize);
+
     int getTotalUserCount();
-    
-    /**
-     * Get users with pagination and search
-     * @param page Page number (starting from 1)
-     * @param pageSize Number of users per page
-     * @param searchQuery Search query for username or email
-     * @return List of users matching the search criteria
-     */
-    List<Map<String, Object>> getUsersWithPaginationAndSearch(int page, int pageSize, String searchQuery);
-    
-    /**
-     * Get total count of users matching search criteria
-     * @param searchQuery Search query for username or email
-     * @return Total number of users matching the search
-     */
+
+    List<User> getUsersWithPaginationAndSearchTyped(int page, int pageSize, String searchQuery);
+
     int getTotalUserCountWithSearch(String searchQuery);
-    
-    /**
-     * Get total count of approved users (excluding pending users)
-     * @return Total number of approved users
-     */
+
     int getApprovedUserCount();
-    
-    /**
-     * Get total count of approved users matching search criteria (excluding pending users)
-     * @param searchQuery Search query for username or email
-     * @return Total number of approved users matching the search
-     */
+
     int getApprovedUserCountWithSearch(String searchQuery);
-    
-    /**
-     * Get approved users with pagination (excluding pending users)
-     * @param page Page number (starting from 1)
-     * @param pageSize Number of users per page
-     * @return List of approved users for the specified page
-     */
-    List<Map<String, Object>> getApprovedUsersWithPagination(int page, int pageSize);
-    
-    /**
-     * Get approved users with pagination and search (excluding pending users)
-     * @param page Page number (starting from 1)
-     * @param pageSize Number of users per page
-     * @param searchQuery Search query for username or email
-     * @return List of approved users matching the search criteria
-     */
-    List<Map<String, Object>> getApprovedUsersWithPaginationAndSearch(int page, int pageSize, String searchQuery);
-    
-    /**
-     * Get user by UUID
-     * @param uuid User UUID
-     * @return User data map
-     */
-    Map<String, Object> getUserByUuid(String uuid);
-    
-    /**
-     * Get user by username
-     * @param username Username
-     * @return User data map
-     */
-    Map<String, Object> getUserByUsername(String username);
-    
-    /**
-     * Delete user
-     * @param uuidOrName User UUID or username
-     * @return true if deletion successful
-     */
+
+    List<User> getApprovedUsersWithPaginationTyped(int page, int pageSize);
+
+    List<User> getApprovedUsersWithPaginationAndSearchTyped(int page, int pageSize, String searchQuery);
+
+    User getUserByUuidTyped(String uuid);
+
+    User getUserByUsernameTyped(String username);
+
     boolean deleteUser(String uuidOrName);
-    
-    /**
-     * Save data
-     */
+
     void save();
-    
-    /**
-     * Count users by email
-     * @param email Email address
-     * @return Number of users with this email
-     */
+
     int countUsersByEmail(String email);
-    
-    /**
-     * Get pending users list
-     * @return List of pending users
-     */
-    List<Map<String, Object>> getPendingUsers();
-    
-    /**
-     * Update user's Discord ID
-     * @param uuidOrName User UUID or username
-     * @param discordId Discord user ID
-     * @return true if update successful
-     */
+
+    List<User> getPendingUsersTyped();
+
     boolean updateUserDiscordId(String uuidOrName, String discordId);
-    
-    /**
-     * Get user by Discord ID
-     * @param discordId Discord user ID
-     * @return User data map or null if not found
-     */
-    Map<String, Object> getUserByDiscordId(String discordId);
-    
-    /**
-     * Check if Discord ID is already linked to another user
-     * @param discordId Discord user ID
-     * @return true if Discord ID is already linked
-     */
+
+    User getUserByDiscordIdTyped(String discordId);
+
     boolean isDiscordIdLinked(String discordId);
-} 
+
+    @Deprecated
+    List<Map<String, Object>> getAllUsers();
+
+    @Deprecated
+    List<Map<String, Object>> getUsersWithPagination(int page, int pageSize);
+
+    @Deprecated
+    List<Map<String, Object>> getUsersWithPaginationAndSearch(int page, int pageSize, String searchQuery);
+
+    @Deprecated
+    List<Map<String, Object>> getApprovedUsersWithPagination(int page, int pageSize);
+
+    @Deprecated
+    List<Map<String, Object>> getApprovedUsersWithPaginationAndSearch(int page, int pageSize, String searchQuery);
+
+    @Deprecated
+    Map<String, Object> getUserByUuid(String uuid);
+
+    @Deprecated
+    Map<String, Object> getUserByUsername(String username);
+
+    @Deprecated
+    List<Map<String, Object>> getPendingUsers();
+
+    @Deprecated
+    Map<String, Object> getUserByDiscordId(String discordId);
+}

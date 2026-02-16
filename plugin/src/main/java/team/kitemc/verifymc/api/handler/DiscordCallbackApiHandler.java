@@ -5,7 +5,7 @@ import com.sun.net.httpserver.HttpHandler;
 import java.io.IOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import org.json.JSONObject;
+import team.kitemc.verifymc.application.dto.DiscordCallbackResponseDto;
 import team.kitemc.verifymc.service.DiscordService;
 import team.kitemc.verifymc.web.WebServer;
 
@@ -43,10 +43,7 @@ public class DiscordCallbackApiHandler implements HttpHandler {
             if (wantsHtml) {
                 webServer.sendDiscordCallbackHtml(exchange, false, "Missing code or state parameter", null);
             } else {
-                JSONObject resp = new JSONObject();
-                resp.put("success", false);
-                resp.put("msg", "Missing code or state parameter");
-                webServer.sendJson(exchange, resp);
+                webServer.sendJson(exchange, new DiscordCallbackResponseDto(false, "Missing code or state parameter").toJson());
             }
             return;
         }
