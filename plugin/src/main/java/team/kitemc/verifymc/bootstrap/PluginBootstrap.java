@@ -22,6 +22,7 @@ import team.kitemc.verifymc.service.CaptchaService;
 import team.kitemc.verifymc.service.DiscordService;
 import team.kitemc.verifymc.service.FeatureFlagService;
 import team.kitemc.verifymc.service.QuestionnaireService;
+import team.kitemc.verifymc.service.RateLimitService;
 import team.kitemc.verifymc.service.VerifyCodeService;
 import team.kitemc.verifymc.service.VersionCheckService;
 import team.kitemc.verifymc.web.ReviewWebSocketServer;
@@ -117,7 +118,7 @@ public class PluginBootstrap {
         registry.webServer = new WebServer(port, staticDir, plugin, registry.codeService, registry.mailService,
                 registry.userDao, registry.auditDao, registry.authmeService, registry.captchaService,
                 registry.questionnaireService, registry.discordService, registry.wsServer, registry.messages,
-                registry.configProvider, registry.featureFlagService);
+                registry.configProvider, registry.featureFlagService, new RateLimitService());
         try {
             registry.webServer.start();
             plugin.getLogger().info(plugin.getMessagePublic("web.start_success") + ": " + port);

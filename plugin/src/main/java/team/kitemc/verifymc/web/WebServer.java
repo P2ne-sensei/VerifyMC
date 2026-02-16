@@ -33,7 +33,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Pattern;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
@@ -45,6 +44,15 @@ import team.kitemc.verifymc.api.handler.ReviewApiHandler;
 import team.kitemc.verifymc.api.router.AdminRouter;
 import team.kitemc.verifymc.api.router.DiscordRouter;
 import team.kitemc.verifymc.api.router.PublicRouter;
+import team.kitemc.verifymc.application.validation.InputValidationService;
+import team.kitemc.verifymc.application.validation.QuestionnaireAnswerValidator;
+import team.kitemc.verifymc.service.RateLimitService;
+import team.kitemc.verifymc.web.handler.ConfigHandler;
+import team.kitemc.verifymc.web.handler.WhitelistCheckHandler;
+import team.kitemc.verifymc.web.handler.VersionCheckHandler;
+import team.kitemc.verifymc.web.router.PublicRouteRegistrar;
+import team.kitemc.verifymc.web.router.AdminRouteRegistrar;
+import team.kitemc.verifymc.web.router.QuestionnaireRouteRegistrar;
 
 public class WebServer {
     private HttpServer server;
@@ -71,10 +79,10 @@ public class WebServer {
     
     // Authentication related
     private final WebAuthHelper webAuthHelper;
-    private final Pattern EMAIL_PATTERN = Pattern.compile("^[A-Za-z0-9+_.-]+@(.+)$");
-    private final Pattern UUID_PATTERN = Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
     private final ConcurrentHashMap<String, RegistrationProcessingHandler.QuestionnaireSubmissionRecord> questionnaireSubmissionStore = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, WindowRateLimitRecord> questionnaireRateLimitStore = new ConcurrentHashMap<>();
+    private final InputValidationService inputValidationService;
+    private final QuestionnaireAnswerValidator questionnaireAnswerValidator;
+    private final RateLimitService rateLimitService;
 
     // Default mainstream email domain whitelist
     private static final java.util.List<String> DEFAULT_EMAIL_DOMAIN_WHITELIST = Arrays.asList(
@@ -83,7 +91,7 @@ public class WebServer {
         "protonmail.com", "zoho.com"
     );
 
-    public WebServer(int port, String staticDir, Plugin plugin, VerifyCodeService codeService, MailService mailService, UserDao userDao, AuditDao auditDao, AuthmeService authmeService, CaptchaService captchaService, QuestionnaireService questionnaireService, DiscordService discordService, ReviewWebSocketServer wsServer, ResourceBundle messages, ConfigProvider configProvider, FeatureFlagService featureFlagService) {
+    public WebServer(int port, String staticDir, Plugin plugin, VerifyCodeService codeService, MailService mailService, UserDao userDao, AuditDao auditDao, AuthmeService authmeService, CaptchaService captchaService, QuestionnaireService questionnaireService, DiscordService discordService, ReviewWebSocketServer wsServer, ResourceBundle messages, ConfigProvider configProvider, FeatureFlagService featureFlagService, RateLimitService rateLimitService) {
         this.port = port;
         this.staticDir = staticDir;
         this.plugin = plugin;
@@ -99,20 +107,13 @@ public class WebServer {
         this.messages = messages;
         this.configProvider = configProvider;
         this.featureFlagService = featureFlagService;
+        this.rateLimitService = rateLimitService;
+        this.inputValidationService = new InputValidationService();
+        this.questionnaireAnswerValidator = new QuestionnaireAnswerValidator();
         this.debug = configProvider.current().debug();
         this.webAuthHelper = new WebAuthHelper(configProvider);
     }
 
-
-    private static class WindowRateLimitRecord {
-        private int count;
-        private long windowStart;
-
-        private WindowRateLimitRecord(int count, long windowStart) {
-            this.count = count;
-            this.windowStart = windowStart;
-        }
-    }
 
     private static class RateLimitDecision {
         private final boolean allowed;
@@ -128,19 +129,8 @@ public class WebServer {
         if (key == null || key.isBlank() || limit <= 0 || windowMs <= 0) {
             return new RateLimitDecision(true, 0L);
         }
-        long now = System.currentTimeMillis();
-        WindowRateLimitRecord rec = questionnaireRateLimitStore.compute(key, (k, old) -> {
-            if (old == null || now - old.windowStart >= windowMs) {
-                return new WindowRateLimitRecord(1, now);
-            }
-            old.count++;
-            return old;
-        });
-        if (rec.count > limit) {
-            long retryAfterMs = windowMs - (now - rec.windowStart);
-            return new RateLimitDecision(false, Math.max(1L, retryAfterMs));
-        }
-        return new RateLimitDecision(true, 0L);
+        RateLimitService.RateLimitDecision decision = rateLimitService.checkQuestionnaireRateLimit(key, limit, windowMs);
+        return new RateLimitDecision(decision.isAllowed(), decision.getRetryAfterMs());
     }
 
     private String getClientIp(HttpExchange exchange) {
@@ -235,11 +225,11 @@ public class WebServer {
      * Input validation methods
      */
     private boolean isValidEmail(String email) {
-        return email != null && EMAIL_PATTERN.matcher(email).matches();
+        return inputValidationService.isValidEmail(email);
     }
     
     private boolean isValidUUID(String uuid) {
-        return uuid != null && UUID_PATTERN.matcher(uuid).matches();
+        return inputValidationService.isValidUUID(uuid);
     }
     
     private boolean isValidUsername(String username, String platform) {
@@ -340,42 +330,11 @@ public class WebServer {
 
 
     private boolean isSupportedQuestionType(String type) {
-        return "single_choice".equals(type) || "multiple_choice".equals(type) || "text".equals(type);
+        return questionnaireAnswerValidator.isSupportedQuestionType(type);
     }
 
     private void validateAnswer(JSONObject questionDef, String answerType, List<Integer> selectedOptionIds, String textAnswer, int questionId) {
-        boolean required = questionDef.optBoolean("required", false);
-        JSONObject input = questionDef.optJSONObject("input");
-        int minSelections = input != null ? input.optInt("min_selections", 0) : 0;
-        int maxSelections = input != null ? input.optInt("max_selections", Integer.MAX_VALUE) : Integer.MAX_VALUE;
-        int minLength = input != null ? input.optInt("min_length", 0) : 0;
-        int maxLength = input != null ? input.optInt("max_length", Integer.MAX_VALUE) : Integer.MAX_VALUE;
-
-        if ("single_choice".equals(answerType) || "multiple_choice".equals(answerType)) {
-            JSONArray options = questionDef.optJSONArray("options");
-            int optionCount = options != null ? options.length() : 0;
-            if (required && selectedOptionIds.isEmpty()) {
-                throw new IllegalArgumentException("Question " + questionId + " is required");
-            }
-            if (selectedOptionIds.size() < minSelections || selectedOptionIds.size() > maxSelections) {
-                throw new IllegalArgumentException("Invalid selection count for question: " + questionId);
-            }
-            for (Integer optionId : selectedOptionIds) {
-                if (optionId == null || optionId < 0 || optionId >= optionCount) {
-                    throw new IllegalArgumentException("Invalid option id for question: " + questionId);
-                }
-            }
-        } else if ("text".equals(answerType)) {
-            String normalized = textAnswer != null ? textAnswer.trim() : "";
-            if (required && normalized.isEmpty()) {
-                throw new IllegalArgumentException("Question " + questionId + " is required");
-            }
-            if (!normalized.isEmpty() && (normalized.length() < minLength || normalized.length() > maxLength)) {
-                throw new IllegalArgumentException("Invalid text length for question: " + questionId);
-            }
-        } else {
-            throw new IllegalArgumentException("Unsupported question type: " + answerType);
-        }
+        questionnaireAnswerValidator.validateAnswer(questionDef, answerType, selectedOptionIds, textAnswer, questionId);
     }
 
     public void start() throws IOException {
@@ -390,128 +349,11 @@ public class WebServer {
         new PublicRouter().register(server);
         new AdminRouter().register(server);
 
-        // API examples
-        server.createContext("/api/ping", exchange -> {
-            String resp = "{\"msg\":\"pong\"}";
-            exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
-            byte[] data = resp.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, data.length);
-            OutputStream os = exchange.getResponseBody();
-            os.write(data);
-            os.close();
-        });
-        
-        // /api/config configuration interface
-        server.createContext("/api/config", exchange -> {
-            JSONObject resp = new JSONObject();
-            org.bukkit.configuration.file.FileConfiguration config = configProvider.raw();
-            // login configuration
-            JSONObject login = new JSONObject();
-            login.put("enable_email", config.getStringList("auth_methods").contains("email"));
-            login.put("email_smtp", config.getString("smtp.host", ""));
-            // admin configuration
-            JSONObject admin = new JSONObject();
-            // frontend configuration
-            JSONObject frontend = new JSONObject();
-            frontend.put("theme", config.getString("frontend.theme", "default"));
-            frontend.put("logo_url", config.getString("frontend.logo_url", ""));
-            frontend.put("announcement", config.getString("frontend.announcement", ""));
-            frontend.put("web_server_prefix", config.getString("web_server_prefix", "[VerifyMC]"));
-            frontend.put("current_theme", config.getString("frontend.theme", "default"));
-            // authme configuration
-            JSONObject authme = new JSONObject();
-            authme.put("enabled", config.getBoolean("authme.enabled", false));
-            authme.put("require_password", config.getBoolean("authme.require_password", false));
-            authme.put("password_regex", config.getString("authme.password_regex", "^[a-zA-Z0-9_]{8,26}$"));
-            // Username regex pattern
-            frontend.put("username_regex", config.getString("username_regex", "^[a-zA-Z0-9_-]{3,16}$"));
-            
-            // Captcha configuration
-            JSONObject captcha = new JSONObject();
-            java.util.List<String> authMethods = config.getStringList("auth_methods");
-            debugLog("auth_methods from config: " + authMethods);
-            debugLog("captcha enabled: " + authMethods.contains("captcha"));
-            captcha.put("enabled", authMethods.contains("captcha"));
-            captcha.put("email_enabled", authMethods.contains("email"));
-            captcha.put("type", config.getString("captcha.type", "math"));
-            
-            // Bedrock player configuration
-            JSONObject bedrock = new JSONObject();
-            bedrock.put("enabled", config.getBoolean("bedrock.enabled", false));
-            bedrock.put("prefix", config.getString("bedrock.prefix", "."));
-            bedrock.put("username_regex", config.getString("bedrock.username_regex", "^\\.[a-zA-Z0-9_\\s]{3,16}$"));
-            
-            // Questionnaire configuration
-            JSONObject questionnaire = new JSONObject();
-            questionnaire.put("enabled", questionnaireService.isEnabled());
-            questionnaire.put("pass_score", questionnaireService.getPassScore());
-            questionnaire.put("has_text_questions", questionnaireService.hasTextQuestions());
-            
-            // Discord configuration
-            JSONObject discord = new JSONObject();
-            discord.put("enabled", discordService.isEnabled());
-            discord.put("required", discordService.isRequired());
-            
-            resp.put("login", login);
-            resp.put("admin", admin);
-            resp.put("frontend", frontend);
-            resp.put("authme", authme);
-            resp.put("captcha", captcha);
-            resp.put("bedrock", bedrock);
-            resp.put("questionnaire", questionnaire);
-            resp.put("discord", discord);
-            sendJson(exchange, resp);
-        });
-        
-        // /api/check-whitelist - Check if a player is on the whitelist (for proxy plugins)
-        server.createContext("/api/check-whitelist", exchange -> {
-            debugLog("/api/check-whitelist called");
-            if (!"GET".equals(exchange.getRequestMethod())) { 
-                exchange.sendResponseHeaders(405, 0); 
-                exchange.close(); 
-                return; 
-            }
-            
-            String query = exchange.getRequestURI().getQuery();
-            String username = null;
-            if (query != null && query.contains("username=")) {
-                username = query.split("username=")[1].split("&")[0];
-                try {
-                    username = java.net.URLDecoder.decode(username, StandardCharsets.UTF_8);
-                } catch (Exception e) {
-                    // Keep original value
-                }
-            }
-            
-            JSONObject resp = new JSONObject();
-            
-            if (username == null || username.trim().isEmpty()) {
-                resp.put("success", false);
-                resp.put("msg", "Username parameter is required");
-                sendJson(exchange, resp);
-                return;
-            }
-            
-            // Look up user in database
-            java.util.Map<String, Object> user = userDao.getUserByUsername(username);
-            
-            if (user != null) {
-                resp.put("success", true);
-                resp.put("found", true);
-                resp.put("username", user.get("username"));
-                resp.put("status", user.get("status"));
-                resp.put("email", user.get("email"));
-                debugLog("Whitelist check for " + username + ": found, status=" + user.get("status"));
-            } else {
-                resp.put("success", true);
-                resp.put("found", false);
-                resp.put("status", "not_registered");
-                debugLog("Whitelist check for " + username + ": not found");
-            }
-            
-            sendJson(exchange, resp);
-        });
-        
+        new PublicRouteRegistrar(
+                new ConfigHandler(configProvider, questionnaireService, discordService, this::debugLog, this::sendJson),
+                new WhitelistCheckHandler(userDao, this::debugLog, this::sendJson)
+        ).register(server);
+
         new DiscordRouter().register(server, this);
 
         // /api/reload-config reload configuration interface - requires authentication
@@ -1477,58 +1319,8 @@ public class WebServer {
         }));
         
         // Version check API - requires authentication
-        server.createContext("/api/version-check", exchange -> {
-            // Verify authentication
-            if (!webAuthHelper.isAuthenticated(exchange)) {
-                sendJson(exchange, ApiResponseFactory.failure("Authentication required"));
-                return;
-            }
-            
-            if (!"GET".equals(exchange.getRequestMethod())) { 
-                exchange.sendResponseHeaders(405, 0); 
-                exchange.close(); 
-                return; 
-            }
-            
-            try {
-                // Get version check service from main plugin
-                team.kitemc.verifymc.VerifyMC mainPlugin = (team.kitemc.verifymc.VerifyMC) plugin;
-                team.kitemc.verifymc.service.VersionCheckService versionService = mainPlugin.getVersionCheckService();
-                
-                if (versionService != null) {
-                    // Perform async version check
-                    versionService.checkForUpdatesAsync().thenAccept(result -> {
-                        try {
-                            sendJson(exchange, result.toJson());
-                        } catch (Exception e) {
-                            debugLog("Error sending version check response: " + e.getMessage());
-                        }
-                    }).exceptionally(throwable -> {
-                        try {
-                            JSONObject errorResp = new JSONObject();
-                            errorResp.put("success", false);
-                            errorResp.put("error", "Version check failed: " + throwable.getMessage());
-                            sendJson(exchange, errorResp);
-                        } catch (Exception e) {
-                            debugLog("Error sending version check error response: " + e.getMessage());
-                        }
-                        return null;
-                    });
-                } else {
-                    JSONObject resp = new JSONObject();
-                    resp.put("success", false);
-                    resp.put("error", "Version check service not available");
-                    sendJson(exchange, resp);
-                }
-            } catch (Exception e) {
-                debugLog("Version check API error: " + e.getMessage());
-                JSONObject resp = new JSONObject();
-                resp.put("success", false);
-                resp.put("error", "Internal server error");
-                sendJson(exchange, resp);
-            }
-        });
-        
+        new AdminRouteRegistrar(new VersionCheckHandler(plugin, webAuthHelper, this::debugLog, this::sendJson)).register(server);
+
         server.setExecutor(null);
         server.start();
     }
