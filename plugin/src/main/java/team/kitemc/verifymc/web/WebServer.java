@@ -23,6 +23,7 @@ import team.kitemc.verifymc.service.ReviewApplicationService;
 import team.kitemc.verifymc.service.FeatureFlagService;
 import team.kitemc.verifymc.api.adapter.HttpExchangeAdapter;
 import team.kitemc.verifymc.application.config.ConfigProvider;
+import team.kitemc.verifymc.application.usecase.QuestionnaireSubmissionRecord;
 import team.kitemc.verifymc.application.usecase.RegisterUserUseCase;
 import team.kitemc.verifymc.application.usecase.ReviewUserUseCase;
 import org.bukkit.plugin.Plugin;
@@ -38,9 +39,6 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.nio.charset.StandardCharsets;
-import team.kitemc.verifymc.registration.RegistrationOutcome;
-import team.kitemc.verifymc.api.handler.RegistrationApiHandler;
-import team.kitemc.verifymc.api.handler.ReviewApiHandler;
 import team.kitemc.verifymc.api.router.AdminRouter;
 import team.kitemc.verifymc.api.router.DiscordRouter;
 import team.kitemc.verifymc.api.router.PublicRouter;
@@ -79,7 +77,7 @@ public class WebServer {
     
     // Authentication related
     private final WebAuthHelper webAuthHelper;
-    private final ConcurrentHashMap<String, RegistrationProcessingHandler.QuestionnaireSubmissionRecord> questionnaireSubmissionStore = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, QuestionnaireSubmissionRecord> questionnaireSubmissionStore = new ConcurrentHashMap<>();
     private final InputValidationService inputValidationService;
     private final QuestionnaireAnswerValidator questionnaireAnswerValidator;
     private final RateLimitService rateLimitService;
@@ -346,9 +344,6 @@ public class WebServer {
         // Static resources
         server.createContext("/", new StaticHandler(staticDir));
         
-        new PublicRouter().register(server);
-        new AdminRouter().register(server);
-
         new PublicRouteRegistrar(
                 new ConfigHandler(configProvider, questionnaireService, discordService, this::debugLog, this::sendJson),
                 new WhitelistCheckHandler(userDao, this::debugLog, this::sendJson)
@@ -567,7 +562,7 @@ public class WebServer {
                 long submittedAt = System.currentTimeMillis();
                 long expiresAt = submittedAt + 10 * 60 * 1000;
                 String questionnaireToken = UUID.randomUUID().toString();
-                questionnaireSubmissionStore.put(questionnaireToken, RegistrationProcessingHandler.QuestionnaireSubmissionRecord.of(
+                questionnaireSubmissionStore.put(questionnaireToken, new QuestionnaireSubmissionRecord(
                     result.isPassed(),
                     result.getScore(),
                     result.getPassScore(),
@@ -575,7 +570,8 @@ public class WebServer {
                     manualReviewRequired,
                     scoringServiceUnavailable,
                     answersJson,
-                    submittedAt
+                    submittedAt,
+                    expiresAt
                 ));
 
                 resp.put("success", true);
@@ -695,7 +691,6 @@ public class WebServer {
                 userDao,
                 authmeService,
                 captchaService,
-                questionnaireService,
                 discordService,
                 featureFlagService,
                 registrationApplicationService,
@@ -714,7 +709,26 @@ public class WebServer {
                 this::getMsg,
                 this::normalizeUsernameByPlatform
         );
-        server.createContext("/api/register", new RegistrationApiHandler(new RegistrationHandler(registrationProcessingHandler)));
+
+        ReviewUserUseCase reviewUserUseCase = new ReviewUserUseCase(
+                plugin,
+                userDao,
+                authmeService,
+                mailService,
+                reviewApplicationService,
+                wsServer::broadcastMessage,
+                this::debugLog
+        );
+        ReviewProcessingHandler reviewProcessingHandler = new ReviewProcessingHandler(reviewUserUseCase, this::getMsg);
+
+        new PublicRouter(registrationProcessingHandler).register(server);
+        new AdminRouter(exchange -> {
+            if (!webAuthHelper.isAuthenticated(exchange)) {
+                sendJson(exchange, ApiResponseFactory.failure("Authentication required"));
+                return;
+            }
+            reviewProcessingHandler.handle(exchange);
+        }).register(server);
 
         AdminUserOperationHandler adminUserOperationHandler = new AdminUserOperationHandler(configProvider, webAuthHelper, this::getMsg);
         
@@ -756,119 +770,6 @@ public class WebServer {
             }
             sendJson(exchange, resp);
         }));
-        
-        // Unified user review interface - requires authentication
-        ReviewUserUseCase reviewUserUseCase = new ReviewUserUseCase(userDao, reviewApplicationService);
-        server.createContext("/api/review", new ReviewApiHandler(new ReviewHandler(exchange -> {
-            if (!"POST".equals(exchange.getRequestMethod())) { 
-                exchange.sendResponseHeaders(405, 0); 
-                exchange.close(); 
-                return; 
-            }
-            
-            // Verify authentication
-            if (!webAuthHelper.isAuthenticated(exchange)) {
-                sendJson(exchange, ApiResponseFactory.failure("Authentication required"));
-                return;
-            }
-            
-            JSONObject req = new JSONObject(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-            String uuid = req.optString("uuid");
-            String action = req.optString("action");
-            String language = req.optString("language", "en");
-            
-            // Input validation
-            if (!isValidUUID(uuid)) {
-                sendJson(exchange, ApiResponseFactory.failure("Invalid UUID format"));
-                return;
-            }
-            
-            if (!"approve".equals(action) && !"reject".equals(action)) {
-                sendJson(exchange, ApiResponseFactory.failure("Invalid action"));
-                return;
-            }
-            
-            String reason = req.optString("reason", "");
-            
-            JSONObject resp = new JSONObject();
-            try {
-                // Get user information
-                Map<String, Object> user = userDao.getUserByUuid(uuid);
-                if (user == null) {
-                    resp.put("success", false);
-                    resp.put("msg", getMsg("admin.user_not_found", language));
-                    sendJson(exchange, resp);
-                    return;
-                }
-                
-                String username = (String) user.get("username");
-                String password = (String) user.get("password");
-                String userEmail = (String) user.get("email");
-                
-                ReviewUserUseCase.Result useCaseResult = reviewUserUseCase.execute(new ReviewUserUseCase.Command(uuid, action));
-                boolean success = useCaseResult.success();
-                
-                if (success && username != null) {
-                    if ("approve".equals(action)) {
-                        // Review approved, add to whitelist
-                        debugLog("Execute: whitelist add " + username);
-                        org.bukkit.Bukkit.getScheduler().runTask(plugin, () -> {
-                            org.bukkit.Bukkit.dispatchCommand(org.bukkit.Bukkit.getConsoleSender(), "whitelist add " + username);
-                        });
-
-                        // If Authme integration is enabled and password exists, register to Authme
-                        if (authmeService.isAuthmeEnabled() &&
-                            password != null && !password.trim().isEmpty()) {
-                            authmeService.registerToAuthme(username, password);
-                        }
-                    } else {
-                        // Review rejected, ensure user is not in whitelist
-                        debugLog("Execute: whitelist remove " + username);
-                        org.bukkit.Bukkit.getScheduler().runTask(plugin, () -> {
-                            org.bukkit.Bukkit.dispatchCommand(org.bukkit.Bukkit.getConsoleSender(), "whitelist remove " + username);
-                        });
-
-                        // If Authme integration is enabled, unregister user from Authme
-                        if (authmeService.isAuthmeEnabled()) {
-                            authmeService.unregisterFromAuthme(username);
-                        }
-                    }
-                }
-                
-                // Send review result notification to user (async)
-                if (success && userEmail != null && !userEmail.trim().isEmpty()) {
-                    final String finalUsername = username;
-                    final String finalEmail = userEmail;
-                    final boolean approved = "approve".equals(action);
-                    final String finalReason = reason;
-                    final String finalLanguage = language;
-                    new Thread(() -> {
-                        try {
-                            mailService.sendReviewResultNotification(finalEmail, finalUsername, approved, finalReason, finalLanguage);
-                        } catch (Exception e) {
-                            debugLog("Failed to send review result notification: " + e.getMessage());
-                        }
-                    }).start();
-                }
-                
-                JSONObject reviewResp = ApiResponseFactory.create(useCaseResult.success(), getMsg(useCaseResult.messageKey(), language));
-
-                // WebSocket push
-                if (success) {
-                    JSONObject wsMsg = new JSONObject();
-                    wsMsg.put("type", action);
-                    wsMsg.put("uuid", uuid);
-                    wsMsg.put("msg", reviewResp.getString("msg"));
-                    wsServer.broadcastMessage(wsMsg.toString());
-                }
-                sendJson(exchange, reviewResp);
-                return;
-            } catch (Exception e) {
-                ReviewApplicationService.ReviewResult reviewResult = reviewApplicationService.buildReviewResponse(new ReviewApplicationService.ReviewCommand(false, false));
-                sendJson(exchange, ApiResponseFactory.create(reviewResult.success(), getMsg(reviewResult.messageKey(), language)));
-                return;
-            }
-        })));
         
         // Get all users - requires authentication
         server.createContext("/api/all-users", new UserAdminHandler(exchange -> {

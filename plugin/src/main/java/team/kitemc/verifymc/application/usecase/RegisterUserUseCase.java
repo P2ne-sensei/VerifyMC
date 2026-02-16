@@ -18,11 +18,8 @@ import team.kitemc.verifymc.service.AuthmeService;
 import team.kitemc.verifymc.service.CaptchaService;
 import team.kitemc.verifymc.service.DiscordService;
 import team.kitemc.verifymc.service.FeatureFlagService;
-import team.kitemc.verifymc.service.QuestionnaireService;
 import team.kitemc.verifymc.service.RegistrationApplicationService;
 import team.kitemc.verifymc.service.VerifyCodeService;
-import team.kitemc.verifymc.web.RegistrationProcessingHandler;
-import team.kitemc.verifymc.web.RegistrationRequest;
 
 public class RegisterUserUseCase {
     private final Plugin plugin;
@@ -31,11 +28,10 @@ public class RegisterUserUseCase {
     private final UserDao userDao;
     private final AuthmeService authmeService;
     private final CaptchaService captchaService;
-    private final QuestionnaireService questionnaireService;
     private final DiscordService discordService;
     private final FeatureFlagService featureFlagService;
     private final RegistrationApplicationService registrationApplicationService;
-    private final Map<String, RegistrationProcessingHandler.QuestionnaireSubmissionRecord> questionnaireSubmissionStore;
+    private final Map<String, QuestionnaireSubmissionRecord> questionnaireSubmissionStore;
     private final Supplier<List<String>> emailDomainWhitelistProvider;
     private final BiFunction<String, String, String> usernameRegexResolver;
     private final BiPredicate<String, String> usernameValidator;
@@ -51,11 +47,10 @@ public class RegisterUserUseCase {
             UserDao userDao,
             AuthmeService authmeService,
             CaptchaService captchaService,
-            QuestionnaireService questionnaireService,
             DiscordService discordService,
             FeatureFlagService featureFlagService,
             RegistrationApplicationService registrationApplicationService,
-            Map<String, RegistrationProcessingHandler.QuestionnaireSubmissionRecord> questionnaireSubmissionStore,
+            Map<String, QuestionnaireSubmissionRecord> questionnaireSubmissionStore,
             Supplier<List<String>> emailDomainWhitelistProvider,
             BiFunction<String, String, String> usernameRegexResolver,
             BiPredicate<String, String> usernameValidator,
@@ -70,7 +65,6 @@ public class RegisterUserUseCase {
         this.userDao = userDao;
         this.authmeService = authmeService;
         this.captchaService = captchaService;
-        this.questionnaireService = questionnaireService;
         this.discordService = discordService;
         this.featureFlagService = featureFlagService;
         this.registrationApplicationService = registrationApplicationService;
@@ -84,13 +78,12 @@ public class RegisterUserUseCase {
         this.debugLogger = debugLogger;
     }
 
-    public Result execute(Command command) {
-        RegistrationRequest request = command.request();
-        validateBasicInput(request, command.requestId());
-        RegistrationProcessingHandler.QuestionnaireSubmissionRecord questionnaireSubmissionRecord =
-                validateQuestionnaireSubmission(request, command.requestId());
-        validateVerificationMethod(request, command.requestId());
-        validateDiscordRequirement(request, command.requestId());
+    public RegisterUserResult execute(RegisterUserCommand command) {
+        validateBasicInput(command, command.requestId());
+        QuestionnaireSubmissionRecord questionnaireSubmissionRecord =
+                validateQuestionnaireSubmission(command, command.requestId());
+        validateVerificationMethod(command, command.requestId());
+        validateDiscordRequirement(command, command.requestId());
 
         boolean manualReviewRequired = questionnaireSubmissionRecord != null && questionnaireSubmissionRecord.manualReviewRequired();
         boolean questionnairePassed = questionnaireSubmissionRecord != null && questionnaireSubmissionRecord.passed();
@@ -111,7 +104,7 @@ public class RegisterUserUseCase {
         String questionnaireReviewSummary = questionnaireSubmissionRecord != null ? buildQuestionnaireReviewSummary(questionnaireSubmissionRecord.details()) : null;
         Long questionnaireScoredAt = questionnaireSubmissionRecord != null ? questionnaireSubmissionRecord.submittedAt() : null;
 
-        boolean ok = registerUserToDao(request, preDecision.status(), questionnaireScore, questionnairePassedValue, questionnaireReviewSummary, questionnaireScoredAt);
+        boolean ok = registerUserToDao(command, preDecision.status(), questionnaireScore, questionnairePassedValue, questionnaireReviewSummary, questionnaireScoredAt);
 
         RegistrationApplicationService.DecisionResult decision = registrationApplicationService.resolveDecision(
                 new RegistrationApplicationService.DecisionCommand(
@@ -125,20 +118,20 @@ public class RegisterUserUseCase {
 
         if (decision.outcome().name().equals("SUCCESS_WHITELISTED")) {
             Bukkit.getScheduler().runTask(plugin, () ->
-                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "whitelist add " + request.normalizedUsername()));
-            if (authmeService.isAuthmeEnabled() && request.password() != null && !request.password().trim().isEmpty()) {
-                authmeService.registerToAuthme(request.normalizedUsername(), request.password());
+                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "whitelist add " + command.normalizedUsername()));
+            if (authmeService.isAuthmeEnabled() && command.password() != null && !command.password().trim().isEmpty()) {
+                authmeService.registerToAuthme(command.normalizedUsername(), command.password());
             }
         }
 
         RegistrationApplicationService.ResponseResult responseResult = registrationApplicationService.buildRegistrationResponse(
                 new RegistrationApplicationService.ResponseCommand(decision, ok)
         );
-        return new Result(responseResult.success(), responseResult.messageKey(), decision.outcome().name(), command.requestId());
+        return new RegisterUserResult(responseResult.success(), responseResult.messageKey(), decision.outcome().name(), command.requestId());
     }
 
     private boolean registerUserToDao(
-            RegistrationRequest request,
+            RegisterUserCommand request,
             String status,
             Integer questionnaireScore,
             Boolean questionnairePassedValue,
@@ -154,7 +147,7 @@ public class RegisterUserUseCase {
                 questionnaireScore, questionnairePassedValue, questionnaireReviewSummary, questionnaireScoredAt);
     }
 
-    private void validateBasicInput(RegistrationRequest request, String requestId) {
+    private void validateBasicInput(RegisterUserCommand request, String requestId) {
         logRegistrationStage(requestId, "validate_basic_input", null);
         if (request.email().isEmpty() || request.code().isEmpty() || request.uuid().isEmpty()) {
             throw UseCaseFailureException.business("REGISTER_REQUIRED_FIELDS", "register.required");
@@ -195,7 +188,7 @@ public class RegisterUserUseCase {
         }
     }
 
-    private RegistrationProcessingHandler.QuestionnaireSubmissionRecord validateQuestionnaireSubmission(RegistrationRequest request, String requestId) {
+    private QuestionnaireSubmissionRecord validateQuestionnaireSubmission(RegisterUserCommand request, String requestId) {
         logRegistrationStage(requestId, "validate_questionnaire_submission", null);
         if (!featureFlagService.isQuestionnaireEnabled()) {
             return null;
@@ -215,7 +208,7 @@ public class RegisterUserUseCase {
             throw UseCaseFailureException.business("REGISTER_QUESTIONNAIRE_REQUIRED", "register.questionnaire_required");
         }
 
-        RegistrationProcessingHandler.QuestionnaireSubmissionRecord record = questionnaireSubmissionStore.remove(questionnaireToken);
+        QuestionnaireSubmissionRecord record = questionnaireSubmissionStore.remove(questionnaireToken);
         if (record == null) {
             throw UseCaseFailureException.business("REGISTER_QUESTIONNAIRE_MISSING", "register.questionnaire_missing");
         }
@@ -234,7 +227,7 @@ public class RegisterUserUseCase {
         return record;
     }
 
-    private void validateVerificationMethod(RegistrationRequest request, String requestId) {
+    private void validateVerificationMethod(RegisterUserCommand request, String requestId) {
         logRegistrationStage(requestId, "validate_verification_method", null);
         List<String> authMethods = configProvider.raw().getStringList("auth_methods");
         boolean useCaptcha = authMethods.contains("captcha");
@@ -256,7 +249,7 @@ public class RegisterUserUseCase {
         }
     }
 
-    private void validateDiscordRequirement(RegistrationRequest request, String requestId) {
+    private void validateDiscordRequirement(RegisterUserCommand request, String requestId) {
         logRegistrationStage(requestId, "validate_discord_requirement", null);
         if (featureFlagService.isDiscordRequired() && !discordService.isLinked(request.normalizedUsername())) {
             throw UseCaseFailureException.business("DISCORD_REQUIRED", "discord.required", new JSONObject().put("discord_required", true));
@@ -295,7 +288,4 @@ public class RegisterUserUseCase {
         debugLogger.accept("registration_stage=" + payload);
     }
 
-    public record Command(RegistrationRequest request, String requestId) {}
-
-    public record Result(boolean success, String messageKey, String outcome, String requestId) {}
 }

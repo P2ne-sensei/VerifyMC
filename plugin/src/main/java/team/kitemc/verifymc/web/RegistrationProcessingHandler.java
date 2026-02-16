@@ -3,16 +3,16 @@ package team.kitemc.verifymc.web;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import java.io.IOException;
-import java.util.Map;
 import java.util.function.BiFunction;
-import org.json.JSONArray;
-import org.json.JSONObject;
 import team.kitemc.verifymc.api.adapter.HttpExchangeAdapter;
+import team.kitemc.verifymc.application.usecase.RegisterUserCommand;
+import team.kitemc.verifymc.application.usecase.RegisterUserResult;
 import team.kitemc.verifymc.application.usecase.RegisterUserUseCase;
 import team.kitemc.verifymc.application.usecase.UseCaseFailureException;
+import org.json.JSONObject;
 
 public class RegistrationProcessingHandler implements HttpHandler {
-    private static final long QUESTIONNAIRE_SUBMISSION_TTL_MS = 10 * 60 * 1000;
+    public static final long QUESTIONNAIRE_SUBMISSION_TTL_MS = 10 * 60 * 1000;
 
     private final RegisterUserUseCase registerUserUseCase;
     private final HttpExchangeAdapter httpExchangeAdapter;
@@ -40,8 +40,23 @@ public class RegistrationProcessingHandler implements HttpHandler {
         }
 
         RegistrationRequest request = httpExchangeAdapter.readRegistrationRequest(exchange, usernameNormalizer);
+        RegisterUserCommand command = new RegisterUserCommand(
+                request.email(),
+                request.code(),
+                request.uuid(),
+                request.username(),
+                request.normalizedUsername(),
+                request.password(),
+                request.captchaToken(),
+                request.captchaAnswer(),
+                request.language(),
+                request.platform(),
+                request.questionnaire(),
+                requestId
+        );
+
         try {
-            RegisterUserUseCase.Result result = registerUserUseCase.execute(new RegisterUserUseCase.Command(request, requestId));
+            RegisterUserResult result = registerUserUseCase.execute(command);
             String message = messageResolver.apply(result.messageKey(), request.language());
             JSONObject response = ApiResponseFactory.create(result.success(), message, result.success() ? ApiResponseFactory.ERROR_CODE_NONE : ApiResponseFactory.ERROR_CODE_BUSINESS, requestId)
                     .put("outcome", result.outcome());
@@ -51,26 +66,6 @@ public class RegistrationProcessingHandler implements HttpHandler {
         } catch (Exception ex) {
             UseCaseFailureException systemFailure = UseCaseFailureException.system("REGISTER_SYSTEM_ERROR", "register.failed");
             httpExchangeAdapter.writeUseCaseFailure(exchange, systemFailure, request.language(), requestId, key -> messageResolver.apply(key, request.language()));
-        }
-    }
-
-    public record QuestionnaireSubmissionRecord(
-            boolean passed,
-            int score,
-            int passScore,
-            JSONArray details,
-            boolean manualReviewRequired,
-            boolean scoringServiceUnavailable,
-            JSONObject answers,
-            long submittedAt,
-            long expiresAt
-    ) {
-        public static QuestionnaireSubmissionRecord of(boolean passed, int score, int passScore, JSONArray details, boolean manualReviewRequired, boolean scoringServiceUnavailable, JSONObject answers, long submittedAt) {
-            return new QuestionnaireSubmissionRecord(passed, score, passScore, details, manualReviewRequired, scoringServiceUnavailable, answers, submittedAt, submittedAt + QUESTIONNAIRE_SUBMISSION_TTL_MS);
-        }
-
-        public boolean isExpired() {
-            return System.currentTimeMillis() > expiresAt;
         }
     }
 }
