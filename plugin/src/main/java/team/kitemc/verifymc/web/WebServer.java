@@ -20,6 +20,9 @@ import team.kitemc.verifymc.service.DiscordService;
 import team.kitemc.verifymc.service.RegistrationApplicationService;
 import team.kitemc.verifymc.service.QuestionnaireApplicationService;
 import team.kitemc.verifymc.service.ReviewApplicationService;
+import team.kitemc.verifymc.api.adapter.HttpExchangeAdapter;
+import team.kitemc.verifymc.application.usecase.RegisterUserUseCase;
+import team.kitemc.verifymc.application.usecase.ReviewUserUseCase;
 import org.bukkit.plugin.Plugin;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -838,7 +841,7 @@ public class WebServer {
         }));
         
         // /api/register registration interface
-        RegistrationProcessingHandler registrationProcessingHandler = new RegistrationProcessingHandler(
+        RegisterUserUseCase registerUserUseCase = new RegisterUserUseCase(
                 plugin,
                 codeService,
                 userDao,
@@ -849,14 +852,18 @@ public class WebServer {
                 registrationApplicationService,
                 questionnaireSubmissionStore,
                 this::getEmailDomainWhitelist,
-                this::getMsg,
                 this::getUsernameRegexForUser,
                 this::isValidUsername,
                 this::isUsernameCaseConflict,
-                this::normalizeUsernameByPlatform,
                 this::isValidEmail,
                 this::isValidUUID,
                 this::debugLog
+        );
+        RegistrationProcessingHandler registrationProcessingHandler = new RegistrationProcessingHandler(
+                registerUserUseCase,
+                new HttpExchangeAdapter(),
+                this::getMsg,
+                this::normalizeUsernameByPlatform
         );
         server.createContext("/api/register", new RegistrationApiHandler(new RegistrationHandler(registrationProcessingHandler)));
 
@@ -902,6 +909,7 @@ public class WebServer {
         }));
         
         // Unified user review interface - requires authentication
+        ReviewUserUseCase reviewUserUseCase = new ReviewUserUseCase(userDao, reviewApplicationService);
         server.createContext("/api/review", new ReviewApiHandler(new ReviewHandler(exchange -> {
             if (!"POST".equals(exchange.getRequestMethod())) { 
                 exchange.sendResponseHeaders(405, 0); 
@@ -948,8 +956,8 @@ public class WebServer {
                 String password = (String) user.get("password");
                 String userEmail = (String) user.get("email");
                 
-                String status = "approve".equals(action) ? "approved" : "rejected";
-                boolean success = userDao.updateUserStatus(uuid, status);
+                ReviewUserUseCase.Result useCaseResult = reviewUserUseCase.execute(new ReviewUserUseCase.Command(uuid, action));
+                boolean success = useCaseResult.success();
                 
                 if (success && username != null) {
                     if ("approve".equals(action)) {
@@ -994,7 +1002,7 @@ public class WebServer {
                     }).start();
                 }
                 
-                JSONObject reviewResp = reviewApplicationService.buildReviewResponse(success, "approve".equals(action), key -> getMsg(key, language));
+                JSONObject reviewResp = ApiResponseFactory.create(useCaseResult.success(), getMsg(useCaseResult.messageKey(), language));
 
                 // WebSocket push
                 if (success) {
@@ -1007,7 +1015,8 @@ public class WebServer {
                 sendJson(exchange, reviewResp);
                 return;
             } catch (Exception e) {
-                sendJson(exchange, reviewApplicationService.buildReviewResponse(false, false, key -> getMsg(key, language)));
+                ReviewApplicationService.ReviewResult reviewResult = reviewApplicationService.buildReviewResponse(new ReviewApplicationService.ReviewCommand(false, false));
+                sendJson(exchange, ApiResponseFactory.create(reviewResult.success(), getMsg(reviewResult.messageKey(), language)));
                 return;
             }
         })));
