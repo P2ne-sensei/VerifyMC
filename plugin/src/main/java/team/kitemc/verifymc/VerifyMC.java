@@ -7,6 +7,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import team.kitemc.verifymc.bootstrap.PluginBootstrap;
 import team.kitemc.verifymc.bootstrap.ServiceRegistry;
+import team.kitemc.verifymc.application.config.ConfigProvider;
 import team.kitemc.verifymc.web.WebServer;
 import java.io.File;
 import team.kitemc.verifymc.web.ReviewWebSocketServer;
@@ -68,6 +69,7 @@ public class VerifyMC extends JavaPlugin implements Listener {
     private Boolean isFoliaServer = null;
     private PluginBootstrap pluginBootstrap;
     private ServiceRegistry serviceRegistry;
+    private ConfigProvider configProvider;
 
     public void debugLog(String msg) {
         if (debug) getLogger().info("[DEBUG] " + msg);
@@ -115,8 +117,14 @@ public class VerifyMC extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         pluginBootstrap = new PluginBootstrap(this);
-        serviceRegistry = pluginBootstrap.enable();
-        applyServiceRegistry(serviceRegistry);
+        try {
+            serviceRegistry = pluginBootstrap.enable();
+            applyServiceRegistry(serviceRegistry);
+        } catch (RuntimeException ex) {
+            getLogger().severe("[VerifyMC] Startup aborted due to invalid configuration: " + ex.getMessage());
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
 
         autoMigrateIfNeeded(messages);
         migratePlaintextPasswords();
@@ -188,6 +196,7 @@ public class VerifyMC extends JavaPlugin implements Listener {
         questionnaireService = registry.questionnaireService;
         discordService = registry.discordService;
         resourceManager = registry.resourceManager;
+        configProvider = registry.configProvider;
         whitelistMode = registry.whitelistMode;
         whitelistJsonSync = registry.whitelistJsonSync;
         webRegisterUrl = registry.webRegisterUrl;

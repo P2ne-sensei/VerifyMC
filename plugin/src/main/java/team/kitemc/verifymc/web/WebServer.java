@@ -20,7 +20,9 @@ import team.kitemc.verifymc.service.DiscordService;
 import team.kitemc.verifymc.service.RegistrationApplicationService;
 import team.kitemc.verifymc.service.QuestionnaireApplicationService;
 import team.kitemc.verifymc.service.ReviewApplicationService;
+import team.kitemc.verifymc.service.FeatureFlagService;
 import team.kitemc.verifymc.api.adapter.HttpExchangeAdapter;
+import team.kitemc.verifymc.application.config.ConfigProvider;
 import team.kitemc.verifymc.application.usecase.RegisterUserUseCase;
 import team.kitemc.verifymc.application.usecase.ReviewUserUseCase;
 import org.bukkit.plugin.Plugin;
@@ -59,6 +61,8 @@ public class WebServer {
     private final DiscordService discordService;
     private final ReviewWebSocketServer wsServer;
     private final ResourceBundle messages;
+    private final ConfigProvider configProvider;
+    private final FeatureFlagService featureFlagService;
     private final boolean debug;
     private final HashMap<String, ResourceBundle> languageCache = new HashMap<>();
     private final RegistrationApplicationService registrationApplicationService = new RegistrationApplicationService();
@@ -79,7 +83,7 @@ public class WebServer {
         "protonmail.com", "zoho.com"
     );
 
-    public WebServer(int port, String staticDir, Plugin plugin, VerifyCodeService codeService, MailService mailService, UserDao userDao, AuditDao auditDao, AuthmeService authmeService, CaptchaService captchaService, QuestionnaireService questionnaireService, DiscordService discordService, ReviewWebSocketServer wsServer, ResourceBundle messages) {
+    public WebServer(int port, String staticDir, Plugin plugin, VerifyCodeService codeService, MailService mailService, UserDao userDao, AuditDao auditDao, AuthmeService authmeService, CaptchaService captchaService, QuestionnaireService questionnaireService, DiscordService discordService, ReviewWebSocketServer wsServer, ResourceBundle messages, ConfigProvider configProvider, FeatureFlagService featureFlagService) {
         this.port = port;
         this.staticDir = staticDir;
         this.plugin = plugin;
@@ -93,8 +97,10 @@ public class WebServer {
         this.discordService = discordService;
         this.wsServer = wsServer;
         this.messages = messages;
-        this.debug = plugin.getConfig().getBoolean("debug", false);
-        this.webAuthHelper = new WebAuthHelper(plugin);
+        this.configProvider = configProvider;
+        this.featureFlagService = featureFlagService;
+        this.debug = configProvider.current().debug();
+        this.webAuthHelper = new WebAuthHelper(configProvider);
     }
 
 
@@ -253,8 +259,8 @@ public class WebServer {
             return trimmed;
         }
 
-        boolean bedrockEnabled = plugin.getConfig().getBoolean("bedrock.enabled", false);
-        String bedrockPrefix = plugin.getConfig().getString("bedrock.prefix", ".");
+        boolean bedrockEnabled = configProvider.raw().getBoolean("bedrock.enabled", false);
+        String bedrockPrefix = configProvider.raw().getString("bedrock.prefix", ".");
         boolean explicitBedrock = "bedrock".equalsIgnoreCase(platform);
 
         if (bedrockEnabled && explicitBedrock && bedrockPrefix != null && !bedrockPrefix.isEmpty() && !trimmed.startsWith(bedrockPrefix)) {
@@ -265,15 +271,15 @@ public class WebServer {
     }
 
     private String getUsernameRegexForUser(String username, String platform) {
-        boolean bedrockEnabled = plugin.getConfig().getBoolean("bedrock.enabled", false);
-        String bedrockPrefix = plugin.getConfig().getString("bedrock.prefix", ".");
+        boolean bedrockEnabled = configProvider.raw().getBoolean("bedrock.enabled", false);
+        String bedrockPrefix = configProvider.raw().getString("bedrock.prefix", ".");
         boolean explicitBedrock = "bedrock".equalsIgnoreCase(platform);
 
         if (bedrockEnabled && (explicitBedrock || (username != null && username.startsWith(bedrockPrefix)))) {
-            return plugin.getConfig().getString("bedrock.username_regex", "^\\.[a-zA-Z0-9_\\s]{3,16}$");
+            return configProvider.raw().getString("bedrock.username_regex", "^\\.[a-zA-Z0-9_\\s]{3,16}$");
         }
 
-        return plugin.getConfig().getString("username_regex", "^[a-zA-Z0-9_-]{3,16}$");
+        return configProvider.raw().getString("username_regex", "^[a-zA-Z0-9_-]{3,16}$");
     }
     private boolean isUsernameCaseConflict(String username) {
         return ((team.kitemc.verifymc.VerifyMC)plugin).isUsernameCaseConflict(username);
@@ -293,7 +299,7 @@ public class WebServer {
     private java.util.List<String> getEmailDomainWhitelist() {
         java.util.List<String> list = null;
         try {
-            list = plugin.getConfig().getStringList("email_domain_whitelist");
+            list = configProvider.raw().getStringList("email_domain_whitelist");
         } catch (Exception ignored) {}
         if (list == null || list.isEmpty()) {
             return DEFAULT_EMAIL_DOMAIN_WHITELIST;
@@ -307,7 +313,7 @@ public class WebServer {
      */
     private boolean isEmailDomainWhitelistEnabled() {
         try {
-            return plugin.getConfig().getBoolean("enable_email_domain_whitelist", true);
+            return configProvider.current().auth().emailDomainWhitelistEnabled();
         } catch (Exception ignored) {}
         return true;
     }
@@ -317,7 +323,7 @@ public class WebServer {
      */
     private boolean isEmailAliasLimitEnabled() {
         try {
-            return plugin.getConfig().getBoolean("enable_email_alias_limit", false);
+            return configProvider.current().auth().emailAliasLimitEnabled();
         } catch (Exception ignored) {}
         return false;
     }
@@ -398,7 +404,7 @@ public class WebServer {
         // /api/config configuration interface
         server.createContext("/api/config", exchange -> {
             JSONObject resp = new JSONObject();
-            org.bukkit.configuration.file.FileConfiguration config = plugin.getConfig();
+            org.bukkit.configuration.file.FileConfiguration config = configProvider.raw();
             // login configuration
             JSONObject login = new JSONObject();
             login.put("enable_email", config.getStringList("auth_methods").contains("email"));
@@ -525,10 +531,11 @@ public class WebServer {
             JSONObject resp = new JSONObject();
             try {
                 plugin.reloadConfig();
-                // Update static file directory to support theme switching
-                String theme = plugin.getConfig().getString("frontend.theme", "default");
-                
-                // Use ResourceManager to check theme
+                ConfigProvider.ConfigVersionSnapshot snapshot = configProvider.reloadAndReplace(plugin.getConfig());
+                discordService.loadConfig();
+
+                String theme = snapshot.config().frontendTheme();
+
                 team.kitemc.verifymc.ResourceManager resourceManager = new team.kitemc.verifymc.ResourceManager((org.bukkit.plugin.java.JavaPlugin) plugin);
                 if (!resourceManager.themeExists(theme)) {
                     resp.put("success", false);
@@ -536,20 +543,18 @@ public class WebServer {
                     sendJson(exchange, resp);
                     return;
                 }
-                
+
                 String newStaticDir = resourceManager.getThemeStaticDir(theme);
-                
-                // Update static file directory
-                debugLog("Switching theme from " + this.staticDir + " to " + newStaticDir);
+                debugLog("Switching theme from " + this.staticDir + " to " + newStaticDir + " [configVersion=" + snapshot.version() + "]");
                 this.staticDir = newStaticDir;
-                
-                // Recreate static file handler
+
                 server.removeContext("/");
                 server.createContext("/", new StaticHandler(staticDir));
                 debugLog("Static handler updated for theme: " + theme);
-                
+
                 resp.put("success", true);
                 resp.put("message", "Configuration reloaded successfully. Theme switched to: " + theme);
+                resp.put("config_version", snapshot.version());
             } catch (Exception e) {
                 resp.put("success", false);
                 resp.put("message", "Failed to reload configuration: " + e.getMessage());
@@ -624,10 +629,10 @@ public class WebServer {
             String requestUuid = req.optString("uuid", "").trim().toLowerCase();
             String requestEmail = req.optString("email", "").trim().toLowerCase();
 
-            int ipLimit = plugin.getConfig().getInt("questionnaire.rate_limit.ip.max", 20);
-            int uuidLimit = plugin.getConfig().getInt("questionnaire.rate_limit.uuid.max", 8);
-            int emailLimit = plugin.getConfig().getInt("questionnaire.rate_limit.email.max", 6);
-            long windowMs = plugin.getConfig().getLong("questionnaire.rate_limit.window_ms", 300000L);
+            int ipLimit = configProvider.raw().getInt("questionnaire.rate_limit.ip.max", 20);
+            int uuidLimit = configProvider.raw().getInt("questionnaire.rate_limit.uuid.max", 8);
+            int emailLimit = configProvider.raw().getInt("questionnaire.rate_limit.email.max", 6);
+            long windowMs = configProvider.raw().getLong("questionnaire.rate_limit.window_ms", 300000L);
 
             RateLimitDecision ipDecision = checkQuestionnaireRateLimit("q:ip:" + clientIp, ipLimit, windowMs);
             RateLimitDecision uuidDecision = checkQuestionnaireRateLimit("q:uuid:" + requestUuid, uuidLimit, windowMs);
@@ -825,7 +830,7 @@ public class WebServer {
             debugLog("Generated verification code for email: " + maskEmail(email) + ", codeHash=" + hashToken(code));
             
             // Get email subject from config.yml, fallback to default if not set
-            String emailSubject = plugin.getConfig().getString("email_subject", "VerifyMC Verification Code");
+            String emailSubject = configProvider.raw().getString("email_subject", "VerifyMC Verification Code");
             boolean sent = mailService.sendCode(email, emailSubject, code, language);
             JSONObject resp = new JSONObject();
             resp.put("success", sent);
@@ -843,12 +848,14 @@ public class WebServer {
         // /api/register registration interface
         RegisterUserUseCase registerUserUseCase = new RegisterUserUseCase(
                 plugin,
+                configProvider,
                 codeService,
                 userDao,
                 authmeService,
                 captchaService,
                 questionnaireService,
                 discordService,
+                featureFlagService,
                 registrationApplicationService,
                 questionnaireSubmissionStore,
                 this::getEmailDomainWhitelist,
@@ -867,7 +874,7 @@ public class WebServer {
         );
         server.createContext("/api/register", new RegistrationApiHandler(new RegistrationHandler(registrationProcessingHandler)));
 
-        AdminUserOperationHandler adminUserOperationHandler = new AdminUserOperationHandler(plugin, webAuthHelper, this::getMsg);
+        AdminUserOperationHandler adminUserOperationHandler = new AdminUserOperationHandler(configProvider, webAuthHelper, this::getMsg);
         
         // Admin login
         server.createContext("/api/admin-login", new UserAdminHandler(adminUserOperationHandler.adminLoginHandler()));
@@ -1373,7 +1380,7 @@ public class WebServer {
             // Validate password format
             if (!authmeService.isValidPassword(newPassword)) {
                 resp.put("success", false);
-                String passwordRegex = plugin.getConfig().getString("authme.password_regex", "^[a-zA-Z0-9_]{8,26}$");
+                String passwordRegex = configProvider.raw().getString("authme.password_regex", "^[a-zA-Z0-9_]{8,26}$");
                 resp.put("msg", getMsg("admin.invalid_password", language).replace("{regex}", passwordRegex));
                 sendJson(exchange, resp);
                 return;
@@ -1636,7 +1643,7 @@ public class WebServer {
      * Send Discord OAuth callback result as an HTML page
      */
     public void sendDiscordCallbackHtml(HttpExchange exchange, boolean success, String message, String discordUsername) throws IOException {
-        String serverName = plugin.getConfig().getString("web_server_prefix", "Server");
+        String serverName = configProvider.raw().getString("web_server_prefix", "Server");
         String statusIcon = success ? "✓" : "✗";
         String statusColor = success ? "#4ade80" : "#f87171";
         String statusText = success ? "Success" : "Failed";

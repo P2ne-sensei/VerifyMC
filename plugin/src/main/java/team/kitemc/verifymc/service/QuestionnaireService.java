@@ -1,6 +1,7 @@
 package team.kitemc.verifymc.service;
 
 import org.bukkit.configuration.file.FileConfiguration;
+import team.kitemc.verifymc.application.config.ConfigProvider;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.Plugin;
 import org.json.JSONArray;
@@ -18,39 +19,43 @@ import java.util.*;
  */
 public class QuestionnaireService {
     private final Plugin plugin;
+    private final ConfigProvider configProvider;
+    private final FeatureFlagService featureFlagService;
     private final boolean debug;
     private FileConfiguration questionnaireConfig;
     private final EssayScoringService essayScoringService;
     private final String llmScoringRule;
     private final boolean llmScoringEnabled;
 
-    public QuestionnaireService(Plugin plugin) {
+    public QuestionnaireService(Plugin plugin, ConfigProvider configProvider, FeatureFlagService featureFlagService) {
         this.plugin = plugin;
-        this.debug = plugin.getConfig().getBoolean("debug", false);
+        this.configProvider = configProvider;
+        this.featureFlagService = featureFlagService;
+        this.debug = configProvider.current().debug();
         this.essayScoringService = buildScoringService();
-        this.llmScoringRule = plugin.getConfig().getString("llm.scoring_rule", "Evaluate relevance, detail and rule-awareness.");
-        this.llmScoringEnabled = plugin.getConfig().getBoolean("llm.enabled", true);
+        this.llmScoringRule = configProvider.raw().getString("llm.scoring_rule", "Evaluate relevance, detail and rule-awareness.");
+        this.llmScoringEnabled = configProvider.raw().getBoolean("llm.enabled", true);
         loadQuestionnaireConfig();
     }
 
     private EssayScoringService buildScoringService() {
-        String provider = plugin.getConfig().getString("llm.provider", "deepseek").toLowerCase(Locale.ROOT);
+        String provider = configProvider.raw().getString("llm.provider", "deepseek").toLowerCase(Locale.ROOT);
         OpenAICompatibleScoringProvider.LlmScoringConfig config = new OpenAICompatibleScoringProvider.LlmScoringConfig(
             provider,
-            plugin.getConfig().getString("llm.api_base", "https://api.deepseek.com/v1"),
-            plugin.getConfig().getString("llm.api_key", ""),
-            plugin.getConfig().getString("llm.model", "deepseek-chat"),
-            plugin.getConfig().getInt("llm.timeout", 10000),
-            plugin.getConfig().getInt("llm.retry", 1),
-            plugin.getConfig().getString("llm.system_prompt", "You are an impartial questionnaire scorer. Return JSON only."),
-            plugin.getConfig().getString("llm.score_format", "{\"score\": number, \"reason\": string, \"confidence\": number}"),
-            plugin.getConfig().getInt("llm.max_concurrency", 4),
-            plugin.getConfig().getInt("llm.acquire_timeout", 1500),
-            plugin.getConfig().getInt("llm.retry_backoff_base", 300),
-            plugin.getConfig().getInt("llm.retry_backoff_max", 5000),
-            plugin.getConfig().getInt("llm.circuit_breaker.failure_threshold", 5),
-            plugin.getConfig().getInt("llm.circuit_breaker.open_ms", 30000),
-            plugin.getConfig().getInt("llm.input_max_length", 2000)
+            configProvider.raw().getString("llm.api_base", "https://api.deepseek.com/v1"),
+            configProvider.raw().getString("llm.api_key", ""),
+            configProvider.raw().getString("llm.model", "deepseek-chat"),
+            configProvider.raw().getInt("llm.timeout", 10000),
+            configProvider.raw().getInt("llm.retry", 1),
+            configProvider.raw().getString("llm.system_prompt", "You are an impartial questionnaire scorer. Return JSON only."),
+            configProvider.raw().getString("llm.score_format", "{\"score\": number, \"reason\": string, \"confidence\": number}"),
+            configProvider.raw().getInt("llm.max_concurrency", 4),
+            configProvider.raw().getInt("llm.acquire_timeout", 1500),
+            configProvider.raw().getInt("llm.retry_backoff_base", 300),
+            configProvider.raw().getInt("llm.retry_backoff_max", 5000),
+            configProvider.raw().getInt("llm.circuit_breaker.failure_threshold", 5),
+            configProvider.raw().getInt("llm.circuit_breaker.open_ms", 30000),
+            configProvider.raw().getInt("llm.input_max_length", 2000)
         );
 
         return new OpenAICompatibleScoringProvider(plugin, config);
@@ -91,11 +96,11 @@ public class QuestionnaireService {
     }
 
     public boolean isEnabled() {
-        return plugin.getConfig().getBoolean("questionnaire.enabled", false);
+        return featureFlagService.isQuestionnaireEnabled();
     }
 
     public int getPassScore() {
-        return plugin.getConfig().getInt("questionnaire.pass_score", 60);
+        return configProvider.current().questionnaire().passScore();
     }
 
     public boolean hasTextQuestions() {
