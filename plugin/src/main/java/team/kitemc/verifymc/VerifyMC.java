@@ -5,6 +5,8 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
+import team.kitemc.verifymc.bootstrap.PluginBootstrap;
+import team.kitemc.verifymc.bootstrap.ServiceRegistry;
 import team.kitemc.verifymc.web.WebServer;
 import java.io.File;
 import team.kitemc.verifymc.web.ReviewWebSocketServer;
@@ -64,6 +66,8 @@ public class VerifyMC extends JavaPlugin implements Listener {
     private long lastWhitelistJsonModified = 0;
     public boolean debug = false;
     private Boolean isFoliaServer = null;
+    private PluginBootstrap pluginBootstrap;
+    private ServiceRegistry serviceRegistry;
 
     public void debugLog(String msg) {
         if (debug) getLogger().info("[DEBUG] " + msg);
@@ -93,6 +97,14 @@ public class VerifyMC extends JavaPlugin implements Listener {
         return getMessage(key, getConfigLanguage());
     }
 
+    public String getMessagePublic(String key) {
+        return getMessage(key);
+    }
+
+    public String getMessagePublic(String key, String language) {
+        return getMessage(key, language);
+    }
+
     private String getMessage(String key, String language) {
         if (messages != null && messages.containsKey(key)) {
             return messages.getString(key);
@@ -102,110 +114,27 @@ public class VerifyMC extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
-        saveDefaultConfig();
-        FileConfiguration config = getConfig();
-        whitelistMode = config.getString("whitelist_mode", "bukkit");
-        whitelistJsonSync = config.getBoolean("whitelist_json_sync", true);
-        webRegisterUrl = config.getString("web_register_url", "https://yourdomain.com/");
-        webServerPrefix = config.getString("web_server_prefix", "[VerifyMC]");
-        whitelistJsonPath = Paths.get(getServer().getWorldContainer().getAbsolutePath(), "whitelist.json");
-        debug = config.getBoolean("debug", false);
-        // Initialize resource manager
-        resourceManager = new ResourceManager(this);
-        resourceManager.initializeResources();
-        // Load i18n resource bundle for configured language
-        String configLang = getConfigLanguage();
-        messages = resourceManager.loadI18nBundle(configLang);
-        // Initialize services
-        codeService = new VerifyCodeService(this);
-        mailService = new MailService(this, this::getMessage);
-        authmeService = new AuthmeService(this);
-        versionCheckService = new VersionCheckService(this);
-        captchaService = new CaptchaService(this);
-        questionnaireService = new QuestionnaireService(this);
-        discordService = new DiscordService(this);
-        String storageType = getConfig().getString("storage.type", "data");
-        String lang = getConfig().getString("language", "en");
-        ResourceBundle messages;
-        try {
-            messages = ResourceBundle.getBundle("i18n/messages_" + lang);
-        } catch (MissingResourceException e) {
-            messages = ResourceBundle.getBundle("i18n/messages_en");
-            getLogger().warning("[VerifyMC] No messages_" + lang + ".properties found, fallback to English.");
-        }
+        pluginBootstrap = new PluginBootstrap(this);
+        serviceRegistry = pluginBootstrap.enable();
+        applyServiceRegistry(serviceRegistry);
 
-        if ("mysql".equalsIgnoreCase(storageType)) {
-            Properties mysqlConfig = new Properties();
-            mysqlConfig.setProperty("host", getConfig().getString("storage.mysql.host"));
-            mysqlConfig.setProperty("port", String.valueOf(getConfig().getInt("storage.mysql.port")));
-            mysqlConfig.setProperty("database", getConfig().getString("storage.mysql.database"));
-            mysqlConfig.setProperty("user", getConfig().getString("storage.mysql.user"));
-            mysqlConfig.setProperty("password", getConfig().getString("storage.mysql.password"));
-            try {
-                userDao = new MysqlUserDao(mysqlConfig, messages, this);
-                auditDao = new MysqlAuditDao(mysqlConfig);
-                getLogger().info(messages.getString("storage.mysql.enabled"));
-            } catch (Exception e) {
-                getLogger().severe(messages.getString("storage.migrate.fail").replace("{0}", e.getMessage()));
-                getServer().getPluginManager().disablePlugin(this);
-                return;
-            }
-        } else {
-            File userFile = new File(getDataFolder(), "data/users.json");
-            File auditFile = new File(getDataFolder(), "data/audits.json");
-            userFile.getParentFile().mkdirs();
-            auditFile.getParentFile().mkdirs();
-            userDao = new FileUserDao(userFile, this);
-            auditDao = new FileAuditDao(auditFile);
-            getLogger().info(messages.getString("storage.file.enabled"));
-        }
         autoMigrateIfNeeded(messages);
-
-        // Set UserDao for AuthMe synchronization
-        authmeService.setUserDao(userDao);
         migratePlaintextPasswords();
-        if (authmeService.isAuthmeEnabled()) {
+        if (authmeService != null && authmeService.isAuthmeEnabled()) {
             authmeService.syncApprovedUsers();
         }
-        
-        // Set UserDao for Discord service (for persistent storage)
-        discordService.setUserDao(userDao);
-        
-        // Start WebSocket server (must be before webServer)
-        int port = config.getInt("web_port", 8080);
-        int wsPort = config.getInt("ws_port", port + 1);
-        wsServer = new ReviewWebSocketServer(wsPort, this);
-        try {
-            wsServer.start();
-            getLogger().info(getMessage("websocket.start_success") + ": " + wsPort);
-        } catch (Exception e) {
-            getLogger().warning(getMessage("websocket.start_failed") + ": " + e.getMessage());
-        }
-        // Start web server
-        String theme = config.getString("frontend.theme", "default");
-        String staticDir = resourceManager.getThemeStaticDir(theme);
-        webServer = new WebServer(port, staticDir, this, codeService, mailService, userDao, auditDao, authmeService, captchaService, questionnaireService, discordService, wsServer, messages);
-        try {
-            webServer.start();
-            getLogger().info(getMessage("web.start_success") + ": " + port);
-        } catch (Exception e) {
-            getLogger().warning(getMessage("web.start_failed") + ": " + e.getMessage());
-        }
+
         boolean autoSync = getConfig().getBoolean("auto_sync_whitelist", true);
         boolean autoCleanup = getConfig().getBoolean("auto_cleanup_whitelist", true);
-        // Keep Bukkit whitelist in sync no matter which whitelist mode is chosen
         if (autoSync) {
             syncWhitelistToServer();
         }
-        // Clean up unexpected whitelist entries (without removing approved users)
         if (autoCleanup) {
             cleanupServerWhitelist();
         }
-        // Always register event listener for player login interception
         getServer().getPluginManager().registerEvents(this, this);
 
-        // Periodic AuthMe synchronization
-        if (authmeService.isAuthmeEnabled()) {
+        if (authmeService != null && authmeService.isAuthmeEnabled()) {
             long syncTicks = Math.max(20L, getConfig().getLong("authme.database.sync_interval_seconds", 30L) * 20L);
             new BukkitRunnable() {
                 @Override
@@ -215,17 +144,58 @@ public class VerifyMC extends JavaPlugin implements Listener {
                 }
             }.runTaskTimerAsynchronously(this, syncTicks, syncTicks);
         }
-        
-        // Only start whitelist.json watcher in bukkit mode
+
         if ("bukkit".equalsIgnoreCase(whitelistMode) && whitelistJsonSync) {
-            // Folia doesn't support async repeating tasks, disable whitelist.json watcher on Folia
             if (!isFoliaServer()) {
                 startWhitelistJsonWatcher();
             } else {
                 getLogger().info("§e[VerifyMC] Whitelist.json auto-sync disabled on Folia (use manual /vmc reload instead)");
             }
         }
-        // Compatibility detection and hints
+        logServerCompatibility();
+        getLogger().info(getMessage("plugin.enabled"));
+        startVersionCheck();
+        int pluginId = 26637;
+        Metrics metrics = new Metrics(this, pluginId);
+    }
+
+    @Override
+    public void onDisable() {
+        if (pluginBootstrap != null) {
+            pluginBootstrap.disable(serviceRegistry);
+        }
+        if ("bukkit".equalsIgnoreCase(whitelistMode) && whitelistJsonSync) {
+            syncPluginToWhitelistJson();
+        }
+        getLogger().info(getMessage("plugin.disabled"));
+    }
+
+
+    private void applyServiceRegistry(ServiceRegistry registry) {
+        if (registry == null) {
+            return;
+        }
+        messages = registry.messages;
+        webServer = registry.webServer;
+        wsServer = registry.wsServer;
+        userDao = registry.userDao;
+        auditDao = registry.auditDao;
+        codeService = registry.codeService;
+        mailService = registry.mailService;
+        authmeService = registry.authmeService;
+        versionCheckService = registry.versionCheckService;
+        captchaService = registry.captchaService;
+        questionnaireService = registry.questionnaireService;
+        discordService = registry.discordService;
+        resourceManager = registry.resourceManager;
+        whitelistMode = registry.whitelistMode;
+        whitelistJsonSync = registry.whitelistJsonSync;
+        webRegisterUrl = registry.webRegisterUrl;
+        webServerPrefix = registry.webServerPrefix;
+        whitelistJsonPath = registry.whitelistJsonPath;
+    }
+
+    private void logServerCompatibility() {
         String serverName = getServer().getName().toLowerCase();
         getLogger().info(getMessage("server.cores_supported"));
         if (isFoliaServer()) {
@@ -251,34 +221,6 @@ public class VerifyMC extends JavaPlugin implements Listener {
         } else {
             getLogger().info(getMessage("server.detected.unknown"));
         }
-        getLogger().info(getMessage("plugin.enabled"));
-        
-        // Start version check (async)
-        startVersionCheck();
-        
-        int pluginId = 26637;
-        Metrics metrics = new Metrics(this, pluginId);
-    }
-
-    @Override
-    public void onDisable() {
-        if (webServer != null) webServer.stop();
-        if (wsServer != null) {
-            try {
-                wsServer.stop();
-            } catch (InterruptedException e) {
-                String msg = getMessage("websocket.stop_interrupted") + ": " + e.getMessage();
-                getLogger().warning(msg);
-                Thread.currentThread().interrupt();
-            }
-        }
-        // Save data when plugin is disabled
-        if (userDao != null) userDao.save();
-        if (auditDao != null) auditDao.save();
-        if ("bukkit".equalsIgnoreCase(whitelistMode) && whitelistJsonSync) {
-            syncPluginToWhitelistJson();
-        }
-        getLogger().info(getMessage("plugin.disabled"));
     }
 
     @Override
