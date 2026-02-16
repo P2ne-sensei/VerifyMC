@@ -4,6 +4,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.plugin.Plugin;
 import team.kitemc.verifymc.db.UserDao;
+import team.kitemc.verifymc.domain.user.User;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -96,10 +97,10 @@ public class AuthmeService {
             return;
         }
         try {
-            List<Map<String, Object>> localUsers = userDao.getAllUsers();
-            Map<String, Map<String, Object>> localByLowerName = new HashMap<>();
-            for (Map<String, Object> u : localUsers) {
-                String username = (String) u.get("username");
+            List<User> localUsers = userDao.getAllUsersTyped();
+            Map<String, User> localByLowerName = new HashMap<>();
+            for (User u : localUsers) {
+                String username = u.username();
                 if (username != null) {
                     localByLowerName.put(username.toLowerCase(), u);
                 }
@@ -112,11 +113,11 @@ public class AuthmeService {
             }
 
             // local approved -> authme
-            for (Map<String, Object> local : localUsers) {
-                String status = (String) local.get("status");
-                String username = (String) local.get("username");
-                String password = (String) local.get("password");
-                String email = (String) local.get("email");
+            for (User local : localUsers) {
+                String status = local.status().value();
+                String username = local.username();
+                String password = local.password();
+                String email = local.email();
                 if (username == null || !"approved".equals(status)) {
                     continue;
                 }
@@ -148,7 +149,7 @@ public class AuthmeService {
                 AuthmeProfile profile = entry.getValue();
                 String authPassword = profile != null ? profile.password : null;
                 String authEmail = profile != null ? profile.email : null;
-                Map<String, Object> local = localByLowerName.get(authName.toLowerCase());
+                User local = localByLowerName.get(authName.toLowerCase());
                 if (local == null) {
                     OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(authName);
                     UUID id = offlinePlayer.getUniqueId();
@@ -160,9 +161,9 @@ public class AuthmeService {
                     }
                     continue;
                 }
-                String status = (String) local.get("status");
+                String status = local.status().value();
                 if (!"approved".equals(status)) {
-                    String uuid = (String) local.get("uuid");
+                    String uuid = local.uuid();
                     if (uuid != null) {
                         userDao.updateUserStatus(uuid, "approved");
                     }
@@ -170,9 +171,9 @@ public class AuthmeService {
 
                 // keep local password in sync with AuthMe hash
                 if (authPassword != null && !authPassword.trim().isEmpty()) {
-                    String localPassword = (String) local.get("password");
+                    String localPassword = local.password();
                     if (localPassword == null || localPassword.trim().isEmpty() || !authPassword.equals(localPassword)) {
-                        String uuid = (String) local.get("uuid");
+                        String uuid = local.uuid();
                         if (uuid != null) {
                             userDao.updateUserPassword(uuid, authPassword);
                         } else {
@@ -182,9 +183,9 @@ public class AuthmeService {
                 }
 
                 if (authEmail != null && !authEmail.trim().isEmpty()) {
-                    String localEmail = (String) local.get("email");
+                    String localEmail = local.email();
                     if (localEmail == null || localEmail.trim().isEmpty() || !authEmail.equalsIgnoreCase(localEmail)) {
-                        String uuid = (String) local.get("uuid");
+                        String uuid = local.uuid();
                         if (uuid != null && !uuid.trim().isEmpty()) {
                             userDao.updateUserEmail(uuid, authEmail);
                         } else {

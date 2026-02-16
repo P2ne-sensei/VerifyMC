@@ -4,7 +4,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import org.json.JSONObject;
+import team.kitemc.verifymc.application.dto.DiscordAuthRequestDto;
+import team.kitemc.verifymc.application.dto.DiscordAuthResponseDto;
 import team.kitemc.verifymc.web.WebServer;
 
 public class DiscordAuthApiHandler implements HttpHandler {
@@ -23,33 +24,24 @@ public class DiscordAuthApiHandler implements HttpHandler {
             return;
         }
 
-        JSONObject req = new JSONObject(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-        String username = req.optString("username", "");
-        JSONObject resp = new JSONObject();
+        DiscordAuthRequestDto req = DiscordAuthRequestDto.fromJson(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+        String username = req.username();
 
         if (!webServer.getDiscordService().isEnabled()) {
-            resp.put("success", false);
-            resp.put("msg", "Discord integration is not enabled");
-            webServer.sendJson(exchange, resp);
+            webServer.sendJson(exchange, new DiscordAuthResponseDto(false, "Discord integration is not enabled", null).toJson());
             return;
         }
 
         if (username.isEmpty()) {
-            resp.put("success", false);
-            resp.put("msg", "Username is required");
-            webServer.sendJson(exchange, resp);
+            webServer.sendJson(exchange, new DiscordAuthResponseDto(false, "Username is required", null).toJson());
             return;
         }
 
         String authUrl = webServer.getDiscordService().generateAuthUrl(username);
         if (authUrl != null) {
-            resp.put("success", true);
-            resp.put("auth_url", authUrl);
+            webServer.sendJson(exchange, new DiscordAuthResponseDto(true, null, authUrl).toJson());
         } else {
-            resp.put("success", false);
-            resp.put("msg", "Failed to generate auth URL");
+            webServer.sendJson(exchange, new DiscordAuthResponseDto(false, "Failed to generate auth URL", null).toJson());
         }
-
-        webServer.sendJson(exchange, resp);
     }
 }

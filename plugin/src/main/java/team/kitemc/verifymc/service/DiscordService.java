@@ -5,6 +5,7 @@ import org.bukkit.scheduler.BukkitRunnable;
 import org.json.JSONObject;
 import org.json.JSONArray;
 import team.kitemc.verifymc.db.UserDao;
+import team.kitemc.verifymc.domain.user.User;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -202,9 +203,9 @@ public class DiscordService {
             
             // Check if this Discord account is already linked to another user
             if (userDao != null && userDao.isDiscordIdLinked(user.id)) {
-                Map<String, Object> existingUser = userDao.getUserByDiscordId(user.id);
+                User existingUser = userDao.getUserByDiscordIdTyped(user.id);
                 if (existingUser != null) {
-                    String existingUsername = (String) existingUser.get("username");
+                    String existingUsername = existingUser.username();
                     if (!existingUsername.equalsIgnoreCase(username)) {
                         debugLog("Discord account already linked to: " + existingUsername);
                         return new DiscordCallbackResult(false, "This Discord account is already linked to another user", username, user);
@@ -420,10 +421,10 @@ public class DiscordService {
     public boolean isLinked(String username) {
         // First check database
         if (userDao != null) {
-            Map<String, Object> user = userDao.getUserByUsername(username);
+            User user = userDao.getUserByUsernameTyped(username);
             if (user != null) {
-                Object discordId = user.get("discord_id");
-                if (discordId != null && !discordId.toString().isEmpty()) {
+                String discordId = user.discordBinding().discordId();
+                if (discordId != null && !discordId.isEmpty()) {
                     return true;
                 }
             }
@@ -440,11 +441,11 @@ public class DiscordService {
      */
     public String getLinkedDiscordId(String username) {
         if (userDao != null) {
-            Map<String, Object> user = userDao.getUserByUsername(username);
+            User user = userDao.getUserByUsernameTyped(username);
             if (user != null) {
-                Object discordId = user.get("discord_id");
-                if (discordId != null && !discordId.toString().isEmpty()) {
-                    return discordId.toString();
+                String discordId = user.discordBinding().discordId();
+                if (discordId != null && !discordId.isEmpty()) {
+                    return discordId;
                 }
             }
         }

@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import org.json.JSONObject;
+import team.kitemc.verifymc.application.dto.DiscordStatusResponseDto;
 import team.kitemc.verifymc.service.DiscordService;
 import team.kitemc.verifymc.web.WebServer;
 
@@ -35,22 +36,19 @@ public class DiscordStatusApiHandler implements HttpHandler {
             }
         }
 
-        JSONObject resp = new JSONObject();
         if (username == null || username.isEmpty()) {
-            resp.put("success", false);
-            resp.put("msg", "Username is required");
-            webServer.sendJson(exchange, resp);
+            webServer.sendJson(exchange, new DiscordStatusResponseDto(false, "Username is required", false, null).toJson());
             return;
         }
 
-        resp.put("success", true);
-        resp.put("linked", webServer.getDiscordService().isLinked(username));
-        if (webServer.getDiscordService().isLinked(username)) {
+        boolean linked = webServer.getDiscordService().isLinked(username);
+        JSONObject userJson = null;
+        if (linked) {
             DiscordService.DiscordUser user = webServer.getDiscordService().getLinkedUser(username);
             if (user != null) {
-                resp.put("user", user.toJson());
+                userJson = user.toJson();
             }
         }
-        webServer.sendJson(exchange, resp);
+        webServer.sendJson(exchange, new DiscordStatusResponseDto(true, null, linked, userJson).toJson());
     }
 }
