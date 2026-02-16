@@ -3,8 +3,7 @@ package team.kitemc.verifymc.api.handler;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import java.io.IOException;
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import org.json.JSONObject;
 import team.kitemc.verifymc.application.dto.DiscordStatusResponseDto;
 import team.kitemc.verifymc.service.DiscordService;
@@ -20,21 +19,12 @@ public class DiscordStatusApiHandler implements HttpHandler {
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         webServer.debugLog("/api/discord/status called");
-        if (!"GET".equals(exchange.getRequestMethod())) {
-            exchange.sendResponseHeaders(405, 0);
-            exchange.close();
+        if (!ApiHttpRequestHelper.requireMethod(exchange, "GET")) {
             return;
         }
 
-        String query = exchange.getRequestURI().getQuery();
-        String username = null;
-        if (query != null && query.contains("username=")) {
-            username = query.split("username=")[1].split("&")[0];
-            try {
-                username = URLDecoder.decode(username, StandardCharsets.UTF_8);
-            } catch (Exception ignored) {
-            }
-        }
+        Map<String, String> queryParams = ApiHttpRequestHelper.queryParams(exchange);
+        String username = queryParams.get("username");
 
         if (username == null || username.isEmpty()) {
             webServer.sendJson(exchange, new DiscordStatusResponseDto(false, "Username is required", false, null).toJson());

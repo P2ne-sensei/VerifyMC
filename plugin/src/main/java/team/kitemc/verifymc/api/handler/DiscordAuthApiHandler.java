@@ -18,9 +18,7 @@ public class DiscordAuthApiHandler implements HttpHandler {
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         webServer.debugLog("/api/discord/auth called");
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            exchange.sendResponseHeaders(405, 0);
-            exchange.close();
+        if (!ApiHttpRequestHelper.requireMethod(exchange, "POST")) {
             return;
         }
 
