@@ -1,9 +1,7 @@
 package team.kitemc.verifymc;
 
 import org.bukkit.Bukkit;
-import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
-import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import team.kitemc.verifymc.bootstrap.PluginBootstrap;
 import team.kitemc.verifymc.bootstrap.ServiceRegistry;
@@ -30,20 +28,21 @@ import team.kitemc.verifymc.service.DiscordService;
 import java.util.List;
 import java.util.Map;
 import java.util.ResourceBundle;
-import org.bukkit.event.Listener;
-import org.bukkit.event.EventHandler;
-import org.bukkit.event.EventPriority;
-import org.bukkit.event.player.PlayerLoginEvent;
-import org.bukkit.event.player.PlayerLoginEvent.Result;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.scheduler.BukkitRunnable;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
+import team.kitemc.verifymc.application.lifecycle.PluginLifecycleService;
+import team.kitemc.verifymc.command.AddCommandHandler;
+import team.kitemc.verifymc.command.CommandDispatcher;
+import team.kitemc.verifymc.command.HelpCommandHandler;
+import team.kitemc.verifymc.command.PortCommandHandler;
+import team.kitemc.verifymc.command.ReloadCommandHandler;
+import team.kitemc.verifymc.command.RemoveCommandHandler;
+import team.kitemc.verifymc.listener.PlayerWhitelistListener;
+import team.kitemc.verifymc.service.whitelist.WhitelistSyncService;
 
-public class VerifyMC extends JavaPlugin implements Listener {
+public class VerifyMC extends JavaPlugin {
     private ResourceBundle messages;
     private WebServer webServer;
     private ReviewWebSocketServer wsServer;
@@ -64,12 +63,13 @@ public class VerifyMC extends JavaPlugin implements Listener {
     private String webRegisterUrl;
     private String webServerPrefix;
     private Path whitelistJsonPath;
-    private long lastWhitelistJsonModified = 0;
     public boolean debug = false;
     private Boolean isFoliaServer = null;
     private PluginBootstrap pluginBootstrap;
     private ServiceRegistry serviceRegistry;
     private ConfigProvider configProvider;
+    private WhitelistSyncService whitelistSyncService;
+    private PluginLifecycleService pluginLifecycleService;
 
     public void debugLog(String msg) {
         if (debug) getLogger().info("[DEBUG] " + msg);
@@ -99,6 +99,10 @@ public class VerifyMC extends JavaPlugin implements Listener {
         return getMessage(key, getConfigLanguage());
     }
 
+    public String getConfigLanguagePublic() {
+        return getConfigLanguage();
+    }
+
     public String getMessagePublic(String key) {
         return getMessage(key);
     }
@@ -126,40 +130,30 @@ public class VerifyMC extends JavaPlugin implements Listener {
             return;
         }
 
-        autoMigrateIfNeeded(messages);
-        migratePlaintextPasswords();
-        if (authmeService != null && authmeService.isAuthmeEnabled()) {
-            authmeService.syncApprovedUsers();
-        }
+        whitelistSyncService = new WhitelistSyncService(this, userDao, whitelistMode, whitelistJsonSync, whitelistJsonPath);
+        pluginLifecycleService = new PluginLifecycleService(this, authmeService, whitelistSyncService);
+        pluginLifecycleService.orchestrateStartup();
 
-        boolean autoSync = getConfig().getBoolean("auto_sync_whitelist", true);
-        boolean autoCleanup = getConfig().getBoolean("auto_cleanup_whitelist", true);
-        if (autoSync) {
-            syncWhitelistToServer();
-        }
-        if (autoCleanup) {
-            cleanupServerWhitelist();
-        }
-        getServer().getPluginManager().registerEvents(this, this);
+        registerCommandDispatcher();
+        getServer().getPluginManager().registerEvents(new PlayerWhitelistListener(this, userDao, webRegisterUrl), this);
 
-        if (authmeService != null && authmeService.isAuthmeEnabled()) {
-            long syncTicks = Math.max(20L, getConfig().getLong("authme.database.sync_interval_seconds", 30L) * 20L);
+        if (pluginLifecycleService.isAuthmeEnabled()) {
+            long syncTicks = pluginLifecycleService.getAuthmeSyncTicks();
             new BukkitRunnable() {
                 @Override
                 public void run() {
                     authmeService.syncApprovedUsers();
-                    syncWhitelistToServer();
+                    whitelistSyncService.syncWhitelistToServer();
                 }
             }.runTaskTimerAsynchronously(this, syncTicks, syncTicks);
         }
 
-        if ("bukkit".equalsIgnoreCase(whitelistMode) && whitelistJsonSync) {
-            if (!isFoliaServer()) {
-                startWhitelistJsonWatcher();
-            } else {
-                getLogger().info("§e[VerifyMC] Whitelist.json auto-sync disabled on Folia (use manual /vmc reload instead)");
-            }
+        if (pluginLifecycleService.shouldStartWhitelistWatcher(isFoliaServer())) {
+            whitelistSyncService.startWhitelistJsonWatcher();
+        } else if (whitelistSyncService.isBukkitWhitelistJsonSyncEnabled() && isFoliaServer()) {
+            getLogger().info("§e[VerifyMC] Whitelist.json auto-sync disabled on Folia (use manual /vmc reload instead)");
         }
+
         logServerCompatibility();
         getLogger().info(getMessage("plugin.enabled"));
         startVersionCheck();
@@ -167,13 +161,26 @@ public class VerifyMC extends JavaPlugin implements Listener {
         Metrics metrics = new Metrics(this, pluginId);
     }
 
+    private void registerCommandDispatcher() {
+        CommandDispatcher dispatcher = new CommandDispatcher()
+            .register(new HelpCommandHandler(this))
+            .register(new ReloadCommandHandler(this))
+            .register(new AddCommandHandler(this))
+            .register(new RemoveCommandHandler(this))
+            .register(new PortCommandHandler(this));
+        if (getCommand("vmc") != null) {
+            getCommand("vmc").setExecutor(dispatcher);
+            getCommand("vmc").setTabCompleter(dispatcher);
+        }
+    }
+
     @Override
     public void onDisable() {
         if (pluginBootstrap != null) {
             pluginBootstrap.disable(serviceRegistry);
         }
-        if ("bukkit".equalsIgnoreCase(whitelistMode) && whitelistJsonSync) {
-            syncPluginToWhitelistJson();
+        if (pluginLifecycleService != null) {
+            pluginLifecycleService.orchestrateShutdown();
         }
         getLogger().info(getMessage("plugin.disabled"));
     }
@@ -232,93 +239,14 @@ public class VerifyMC extends JavaPlugin implements Listener {
         }
     }
 
-    @Override
-    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!command.getName().equalsIgnoreCase("vmc")) return false;
-        String language = getConfigLanguage();
-        boolean isPlayer = sender instanceof Player;
-        Player player = isPlayer ? (Player) sender : null;
-        // Both console and players can execute
-        if (args.length == 0) {
-            showHelp(sender, language);
-            return true;
-        }
-        String subCommand = args[0].toLowerCase();
-        switch (subCommand) {
-            case "help":
-                showHelp(sender, language);
-                break;
-            case "reload":
-                if (isPlayer && !player.hasPermission("verifymc.admin")) {
-                    player.sendMessage("§c" + getMessage("command.no_permission", language));
-                    return true;
-                }
-                reloadPlugin(sender, language);
-                break;
-            case "add":
-                if (args.length < 3) {
-                    sender.sendMessage("§e" + getMessage("command.add_usage", language));
-                    return true;
-                }
-                String addName = args[1];
-                String addEmail = args[2];
-                if (isPlayer) {
-                    if (!player.hasPermission("verifymc.admin")) {
-                        player.sendMessage("§c" + getMessage("command.no_permission", language));
-                        return true;
-                    }
-                    addWhitelist(player, addName, addEmail, language);
-                } else {
-                    addWhitelist(sender, addName, addEmail, language);
-                }
-                break;
-            case "remove":
-                if (args.length < 2) {
-                    sender.sendMessage("§e" + getMessage("command.remove_usage", language));
-                    return true;
-                }
-                String removeName = args[1];
-                if (isPlayer) {
-                    if (!player.hasPermission("verifymc.admin")) {
-                        player.sendMessage("§c" + getMessage("command.no_permission", language));
-                        return true;
-                    }
-                    removeWhitelist(player, removeName, language);
-                } else {
-                    removeWhitelist(sender, removeName, language);
-                }
-                break;
-            case "port":
-                showPort(sender, language);
-                break;
-            default:
-                showHelp(sender, language);
-                break;
-        }
-        return true;
-    }
-
-    @Override
-    public java.util.List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (!command.getName().equalsIgnoreCase("vmc")) return null;
-        java.util.List<String> subCommands = java.util.Arrays.asList("help", "reload", "add", "remove", "port");
-        if (args.length == 1) {
-            String prefix = args[0].toLowerCase();
-            java.util.List<String> result = new java.util.ArrayList<>();
-            for (String cmd : subCommands) {
-                if (cmd.startsWith(prefix)) result.add(cmd);
-            }
-            return result;
-        }
-        return java.util.Collections.emptyList();
-    }
-
+    
+    
     /**
      * Display help information for console and players
      * @param sender Command sender
      * @param language Language code
      */
-    private void showHelp(CommandSender sender, String language) {
+    public void showHelp(CommandSender sender, String language) {
         sender.sendMessage("§6=== VerifyMC " + getMessage("command.help.title", language) + " ===\n");
         sender.sendMessage("§e/vmc help §7- " + getMessage("command.help.help", language) + "\n");
         sender.sendMessage("§e/vmc port §7- " + getMessage("command.help.port", language) + "\n");
@@ -332,7 +260,7 @@ public class VerifyMC extends JavaPlugin implements Listener {
      * @param sender Command sender
      * @param language Language code
      */
-    private void reloadPlugin(CommandSender sender, String language) {
+    public void reloadPlugin(CommandSender sender, String language) {
         try {
             // Check if theme has changed
             String oldTheme = getConfig().getString("frontend.theme", "default");
@@ -368,7 +296,7 @@ public class VerifyMC extends JavaPlugin implements Listener {
      * @param email Email address
      * @param language Language code
      */
-    private void addWhitelist(CommandSender sender, String targetName, String email, String language) {
+    public void addWhitelist(CommandSender sender, String targetName, String email, String language) {
         addWhitelist(sender, targetName, email, null, language);
     }
     
@@ -431,12 +359,14 @@ public class VerifyMC extends JavaPlugin implements Listener {
             userDao.save();
             
             // Immediately sync to whitelist.json (if enabled)
-            if ("bukkit".equalsIgnoreCase(whitelistMode) && whitelistJsonSync) {
-                syncPluginToWhitelistJson();
+            if (whitelistSyncService != null && whitelistSyncService.isBukkitWhitelistJsonSyncEnabled()) {
+                whitelistSyncService.syncPluginToWhitelistJson();
             }
-            
+
             // Sync to server whitelist
-            syncWhitelistToServer();
+            if (whitelistSyncService != null) {
+                whitelistSyncService.syncWhitelistToServer();
+            }
             
             // WebSocket notification
             if (wsServer != null) {
@@ -459,7 +389,7 @@ public class VerifyMC extends JavaPlugin implements Listener {
      * @param targetName Target username
      * @param language Language code
      */
-    private void removeWhitelist(CommandSender sender, String targetName, String language) {
+    public void removeWhitelist(CommandSender sender, String targetName, String language) {
         try {
             Bukkit.getOfflinePlayer(targetName).setWhitelisted(false);
             // Prioritize username lookup
@@ -495,119 +425,23 @@ public class VerifyMC extends JavaPlugin implements Listener {
      * @param sender Command sender
      * @param language Language code
      */
-    private void showPort(CommandSender sender, String language) {
+    public void showPort(CommandSender sender, String language) {
         int port = getConfig().getInt("web_port", 8080);
         sender.sendMessage("§a" + getMessage("command.port_info", language).replace("{port}", String.valueOf(port)));
     }
 
-    /**
-     * Intercept unregistered players using PlayerLoginEvent
-     * This is called BEFORE the player joins, avoiding chunk loader conflicts
-     * Works in both 'plugin' and 'bukkit' modes for consistent protection
-     * @param event Player login event
-     */
-    @EventHandler(priority = EventPriority.HIGHEST)
-    public void onPlayerLogin(PlayerLoginEvent event) {
-        Player player = event.getPlayer();
-        String ip = event.getAddress() != null ? event.getAddress().getHostAddress() : "";
-        java.util.List<String> bypassIps = getConfig().getStringList("whitelist_bypass_ips");
-        if (bypassIps.contains(ip)) {
-            debugLog("Bypassed whitelist check for IP: " + ip);
-            return; // Skip verification for whitelisted IPs
-        }
-        
-        // Check player name (id) in plugin database
-        Map<String, Object> user = userDao != null ? userDao.getAllUsers().stream()
-            .filter(u -> player.getName().equalsIgnoreCase((String)u.get("username")) && "approved".equals(u.get("status")))
-            .findFirst().orElse(null) : null;
-        
-        if (user == null) {
-            // Player is not in approved list
-            String url = webRegisterUrl;
-            String msg = "§c[ VerifyMC ]\n§7Please visit §a" + url + " §7to register";
-            
-            // Disallow login directly - no need for delayed scheduling
-            // This works on all server types including Folia
-            event.disallow(Result.KICK_WHITELIST, msg);
-            debugLog("Blocked unregistered player: " + player.getName() + " from IP: " + ip);
-        } else {
-            // Ensure approved users are explicitly allowed even if vanilla whitelist rejected them earlier
-            event.setResult(Result.ALLOWED);
-            debugLog("Allowed registered player: " + player.getName() + " (Status: approved)");
-        }
+
+
+    public ResourceBundle getMessages() {
+        return messages;
     }
 
-    /**
-     * Monitor whitelist.json changes in bukkit mode
-     */
-    private void startWhitelistJsonWatcher() {
-        if (whitelistJsonPath == null) return;
-        new BukkitRunnable() {
-            @Override
-            public void run() {
-                try {
-                    if (Files.exists(whitelistJsonPath)) {
-                        long modified = Files.getLastModifiedTime(whitelistJsonPath).toMillis();
-                        if (modified != lastWhitelistJsonModified) {
-                            lastWhitelistJsonModified = modified;
-                            syncWhitelistJsonToPlugin();
-                        }
-                    }
-                } catch (Exception ignored) {}
-            }
-        }.runTaskTimerAsynchronously(this, 40L, 100L); // Check every 5 seconds
+    public void migratePlaintextPasswordsPublic() {
+        migratePlaintextPasswords();
     }
 
-    /**
-     * Synchronize whitelist.json to plugin data
-     */
-    private void syncWhitelistJsonToPlugin() {
-        try {
-            List<String> lines = Files.readAllLines(whitelistJsonPath);
-            String json = String.join("\n", lines);
-            List<Map<String, Object>> list = new Gson().fromJson(json, List.class);
-            for (Map<String, Object> entry : list) {
-                String uuid = (String) entry.get("uuid");
-                if (uuid != null) {
-                    Map<String, Object> user = userDao.getAllUsers().stream().filter(u -> uuid.equals(u.get("uuid"))).findFirst().orElse(null);
-                    if (user != null) {
-                        Object whitelisted = entry.get("whitelisted");
-                        // Only update status if user is currently pending and whitelist.json shows approved
-                        // This prevents overriding manually set statuses
-                        String currentStatus = (String) user.get("status");
-                        if ("pending".equals(currentStatus) && Boolean.TRUE.equals(whitelisted)) {
-                            user.put("status", "approved");
-                        } else if (!"approved".equals(currentStatus) && !"banned".equals(currentStatus) && !Boolean.TRUE.equals(whitelisted)) {
-                            // Only set to pending if not already explicitly set
-                            user.put("status", "pending");
-                        }
-                    }
-                }
-            }
-            userDao.save();
-        } catch (Exception ignored) {}
-    }
-
-    /**
-     * Synchronize plugin data changes to whitelist.json
-     */
-    private void syncPluginToWhitelistJson() {
-        if (!"bukkit".equalsIgnoreCase(whitelistMode)) return;
-        try {
-            List<Map<String, Object>> users = userDao.getAllUsers();
-            List<Map<String, Object>> wl = new java.util.ArrayList<>();
-            for (Map<String, Object> user : users) {
-                if ("approved".equals(user.get("status"))) {
-                    Map<String, Object> entry = new java.util.HashMap<>();
-                    entry.put("uuid", user.get("uuid"));
-                    entry.put("name", user.get("username"));
-                    entry.put("whitelisted", true);
-                    wl.add(entry);
-                }
-            }
-            String json = new GsonBuilder().setPrettyPrinting().create().toJson(wl);
-            Files.write(whitelistJsonPath, json.getBytes(java.nio.charset.StandardCharsets.UTF_8), java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
-        } catch (Exception ignored) {}
+    public WhitelistSyncService getWhitelistSyncService() {
+        return whitelistSyncService;
     }
 
     private static final String USERNAME_REGEX_KEY = "username_regex";
@@ -667,35 +501,6 @@ public class VerifyMC extends JavaPlugin implements Listener {
         return false;
     }
 
-    /**
-     * Synchronize whitelist to server
-     */
-    private void syncWhitelistToServer() {
-        for (Map<String, Object> user : userDao.getAllUsers()) {
-            String name = (String) user.get("username");
-            String status = (String) user.get("status");
-            if ("approved".equals(status)) {
-                Bukkit.getOfflinePlayer(name).setWhitelisted(true);
-            } else if ("banned".equals(status)) {
-                Bukkit.getOfflinePlayer(name).setWhitelisted(false);
-            }
-        }
-    }
-    
-    /**
-     * Clean up server whitelist
-     */
-    private void cleanupServerWhitelist() {
-        for (org.bukkit.OfflinePlayer p : Bukkit.getWhitelistedPlayers()) {
-            Map<String, Object> user = userDao.getUserByUsername(p.getName());
-            if (user == null || !"approved".equals(user.get("status"))) {
-                p.setWhitelisted(false);
-            } else {
-                // Ensure approved users stay whitelisted
-                p.setWhitelisted(true);
-            }
-        }
-    }
 
     /**
      * Auto migrate data between storage types if needed
