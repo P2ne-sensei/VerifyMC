@@ -8,6 +8,10 @@ import java.util.ResourceBundle;
 import org.bukkit.configuration.file.FileConfiguration;
 import team.kitemc.verifymc.ResourceManager;
 import team.kitemc.verifymc.VerifyMC;
+import team.kitemc.verifymc.application.config.BukkitConfigProvider;
+import team.kitemc.verifymc.application.config.ConfigProvider;
+import team.kitemc.verifymc.application.config.ConfigValidationException;
+import team.kitemc.verifymc.application.config.VerifyMcConfig;
 import team.kitemc.verifymc.db.FileAuditDao;
 import team.kitemc.verifymc.db.FileUserDao;
 import team.kitemc.verifymc.db.MysqlAuditDao;
@@ -16,6 +20,7 @@ import team.kitemc.verifymc.mail.MailService;
 import team.kitemc.verifymc.service.AuthmeService;
 import team.kitemc.verifymc.service.CaptchaService;
 import team.kitemc.verifymc.service.DiscordService;
+import team.kitemc.verifymc.service.FeatureFlagService;
 import team.kitemc.verifymc.service.QuestionnaireService;
 import team.kitemc.verifymc.service.VerifyCodeService;
 import team.kitemc.verifymc.service.VersionCheckService;
@@ -34,37 +39,47 @@ public class PluginBootstrap {
         plugin.saveDefaultConfig();
         FileConfiguration config = plugin.getConfig();
 
+        ConfigProvider configProvider = new BukkitConfigProvider();
+        VerifyMcConfig verifiedConfig;
+        try {
+            verifiedConfig = configProvider.reloadAndReplace(config).config();
+        } catch (ConfigValidationException e) {
+            plugin.getLogger().severe("[VerifyMC] " + e.getMessage());
+            throw e;
+        }
+
+        registry.configProvider = configProvider;
+        registry.featureFlagService = new FeatureFlagService(configProvider);
         registry.whitelistMode = config.getString("whitelist_mode", "bukkit");
         registry.whitelistJsonSync = config.getBoolean("whitelist_json_sync", true);
-        registry.webRegisterUrl = config.getString("web_register_url", "https://yourdomain.com/");
-        registry.webServerPrefix = config.getString("web_server_prefix", "[VerifyMC]");
+        registry.webRegisterUrl = verifiedConfig.web().webRegisterUrl();
+        registry.webServerPrefix = verifiedConfig.web().webServerPrefix();
         registry.whitelistJsonPath = Paths.get(plugin.getServer().getWorldContainer().getAbsolutePath(), "whitelist.json");
-        plugin.debug = config.getBoolean("debug", false);
+        plugin.debug = verifiedConfig.debug();
 
         registry.resourceManager = new ResourceManager(plugin);
         registry.resourceManager.initializeResources();
 
-        String configLang = plugin.getConfig().getString("language", "en");
-        registry.messages = registry.resourceManager.loadI18nBundle(configLang);
+        registry.messages = registry.resourceManager.loadI18nBundle(verifiedConfig.language());
 
         registry.codeService = new VerifyCodeService(plugin);
         registry.mailService = new MailService(plugin, plugin::getMessagePublic);
         registry.authmeService = new AuthmeService(plugin);
         registry.versionCheckService = new VersionCheckService(plugin);
         registry.captchaService = new CaptchaService(plugin);
-        registry.questionnaireService = new QuestionnaireService(plugin);
-        registry.discordService = new DiscordService(plugin);
+        registry.questionnaireService = new QuestionnaireService(plugin, configProvider, registry.featureFlagService);
+        registry.discordService = new DiscordService(plugin, configProvider);
 
-        String storageType = plugin.getConfig().getString("storage.type", "data");
-        ResourceBundle messages = loadStorageMessages();
+        ResourceBundle messages = loadStorageMessages(verifiedConfig.language());
+        VerifyMcConfig.StorageConfig storageConfig = verifiedConfig.storage();
 
-        if ("mysql".equalsIgnoreCase(storageType)) {
+        if ("mysql".equalsIgnoreCase(storageConfig.type())) {
             Properties mysqlConfig = new Properties();
-            mysqlConfig.setProperty("host", plugin.getConfig().getString("storage.mysql.host"));
-            mysqlConfig.setProperty("port", String.valueOf(plugin.getConfig().getInt("storage.mysql.port")));
-            mysqlConfig.setProperty("database", plugin.getConfig().getString("storage.mysql.database"));
-            mysqlConfig.setProperty("user", plugin.getConfig().getString("storage.mysql.user"));
-            mysqlConfig.setProperty("password", plugin.getConfig().getString("storage.mysql.password"));
+            mysqlConfig.setProperty("host", storageConfig.mysqlHost());
+            mysqlConfig.setProperty("port", String.valueOf(storageConfig.mysqlPort()));
+            mysqlConfig.setProperty("database", storageConfig.mysqlDatabase());
+            mysqlConfig.setProperty("user", storageConfig.mysqlUser());
+            mysqlConfig.setProperty("password", storageConfig.mysqlPassword());
             try {
                 registry.userDao = new MysqlUserDao(mysqlConfig, messages, plugin);
                 registry.auditDao = new MysqlAuditDao(mysqlConfig);
@@ -87,8 +102,8 @@ public class PluginBootstrap {
         registry.authmeService.setUserDao(registry.userDao);
         registry.discordService.setUserDao(registry.userDao);
 
-        int port = config.getInt("web_port", 8080);
-        int wsPort = config.getInt("ws_port", port + 1);
+        int port = verifiedConfig.web().webPort();
+        int wsPort = verifiedConfig.web().wsPort();
         registry.wsServer = new ReviewWebSocketServer(wsPort, plugin);
         try {
             registry.wsServer.start();
@@ -97,11 +112,12 @@ public class PluginBootstrap {
             plugin.getLogger().warning(plugin.getMessagePublic("websocket.start_failed") + ": " + e.getMessage());
         }
 
-        String theme = config.getString("frontend.theme", "default");
+        String theme = verifiedConfig.frontendTheme();
         String staticDir = registry.resourceManager.getThemeStaticDir(theme);
         registry.webServer = new WebServer(port, staticDir, plugin, registry.codeService, registry.mailService,
                 registry.userDao, registry.auditDao, registry.authmeService, registry.captchaService,
-                registry.questionnaireService, registry.discordService, registry.wsServer, registry.messages);
+                registry.questionnaireService, registry.discordService, registry.wsServer, registry.messages,
+                registry.configProvider, registry.featureFlagService);
         try {
             registry.webServer.start();
             plugin.getLogger().info(plugin.getMessagePublic("web.start_success") + ": " + port);
@@ -135,8 +151,7 @@ public class PluginBootstrap {
         }
     }
 
-    private ResourceBundle loadStorageMessages() {
-        String lang = plugin.getConfig().getString("language", "en");
+    private ResourceBundle loadStorageMessages(String lang) {
         try {
             return ResourceBundle.getBundle("i18n/messages_" + lang);
         } catch (MissingResourceException e) {

@@ -4,6 +4,7 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.json.JSONObject;
 import org.json.JSONArray;
+import team.kitemc.verifymc.application.config.ConfigProvider;
 import team.kitemc.verifymc.db.UserDao;
 import team.kitemc.verifymc.domain.user.User;
 
@@ -25,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class DiscordService {
     private final Plugin plugin;
+    private final ConfigProvider configProvider;
     private final boolean debug;
     private UserDao userDao;
     
@@ -52,9 +54,10 @@ public class DiscordService {
     // Cleanup interval: 5 minutes
     private static final long CLEANUP_INTERVAL_TICKS = 6000;
     
-    public DiscordService(Plugin plugin) {
+    public DiscordService(Plugin plugin, ConfigProvider configProvider) {
         this.plugin = plugin;
-        this.debug = plugin.getConfig().getBoolean("debug", false);
+        this.configProvider = configProvider;
+        this.debug = configProvider.current().debug();
         loadConfig();
         startCleanupTask();
     }
@@ -118,11 +121,11 @@ public class DiscordService {
      * Load Discord configuration from plugin config
      */
     public void loadConfig() {
-        clientId = plugin.getConfig().getString("discord.client_id", "");
-        clientSecret = plugin.getConfig().getString("discord.client_secret", "");
-        redirectUri = plugin.getConfig().getString("discord.redirect_uri", "");
-        guildId = plugin.getConfig().getString("discord.guild_id", "");
-        required = plugin.getConfig().getBoolean("discord.required", false);
+        clientId = configProvider.current().discord().clientId();
+        clientSecret = configProvider.current().discord().clientSecret();
+        redirectUri = configProvider.current().discord().redirectUri();
+        guildId = configProvider.current().discord().guildId();
+        required = configProvider.current().discord().required();
         
         debugLog("Discord config loaded: clientId=" + (clientId.isEmpty() ? "not set" : "***") + 
                  ", guildId=" + (guildId.isEmpty() ? "not set" : guildId));
@@ -133,8 +136,7 @@ public class DiscordService {
      * @return true if Discord integration is properly configured and enabled
      */
     public boolean isEnabled() {
-        return plugin.getConfig().getBoolean("discord.enabled", false) &&
-               !clientId.isEmpty() && !clientSecret.isEmpty();
+        return configProvider.current().discord().enabled() && !clientId.isEmpty() && !clientSecret.isEmpty();
     }
     
     /**

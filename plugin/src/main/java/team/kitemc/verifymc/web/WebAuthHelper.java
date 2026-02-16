@@ -5,15 +5,15 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
-import org.bukkit.plugin.Plugin;
+import team.kitemc.verifymc.application.config.ConfigProvider;
 
 public class WebAuthHelper {
     private static final long TOKEN_EXPIRY_TIME = 3600000;
-    private final Plugin plugin;
+    private final ConfigProvider configProvider;
     private final ConcurrentHashMap<String, Long> validTokens = new ConcurrentHashMap<>();
 
-    public WebAuthHelper(Plugin plugin) {
-        this.plugin = plugin;
+    public WebAuthHelper(ConfigProvider configProvider) {
+        this.configProvider = configProvider;
     }
 
     public boolean isAuthenticated(HttpExchange exchange) {
@@ -29,7 +29,7 @@ public class WebAuthHelper {
         try {
             String timestamp = String.valueOf(System.currentTimeMillis());
             String random = String.valueOf(Math.random());
-            String secret = plugin.getConfig().getString("admin.password", "default_secret");
+            String secret = configProvider.current().auth().adminPassword();
 
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             String combined = timestamp + random + secret;

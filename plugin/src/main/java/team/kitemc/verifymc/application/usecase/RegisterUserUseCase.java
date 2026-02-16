@@ -12,10 +12,12 @@ import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import team.kitemc.verifymc.application.config.ConfigProvider;
 import team.kitemc.verifymc.db.UserDao;
 import team.kitemc.verifymc.service.AuthmeService;
 import team.kitemc.verifymc.service.CaptchaService;
 import team.kitemc.verifymc.service.DiscordService;
+import team.kitemc.verifymc.service.FeatureFlagService;
 import team.kitemc.verifymc.service.QuestionnaireService;
 import team.kitemc.verifymc.service.RegistrationApplicationService;
 import team.kitemc.verifymc.service.VerifyCodeService;
@@ -24,12 +26,14 @@ import team.kitemc.verifymc.web.RegistrationRequest;
 
 public class RegisterUserUseCase {
     private final Plugin plugin;
+    private final ConfigProvider configProvider;
     private final VerifyCodeService codeService;
     private final UserDao userDao;
     private final AuthmeService authmeService;
     private final CaptchaService captchaService;
     private final QuestionnaireService questionnaireService;
     private final DiscordService discordService;
+    private final FeatureFlagService featureFlagService;
     private final RegistrationApplicationService registrationApplicationService;
     private final Map<String, RegistrationProcessingHandler.QuestionnaireSubmissionRecord> questionnaireSubmissionStore;
     private final Supplier<List<String>> emailDomainWhitelistProvider;
@@ -42,12 +46,14 @@ public class RegisterUserUseCase {
 
     public RegisterUserUseCase(
             Plugin plugin,
+            ConfigProvider configProvider,
             VerifyCodeService codeService,
             UserDao userDao,
             AuthmeService authmeService,
             CaptchaService captchaService,
             QuestionnaireService questionnaireService,
             DiscordService discordService,
+            FeatureFlagService featureFlagService,
             RegistrationApplicationService registrationApplicationService,
             Map<String, RegistrationProcessingHandler.QuestionnaireSubmissionRecord> questionnaireSubmissionStore,
             Supplier<List<String>> emailDomainWhitelistProvider,
@@ -59,12 +65,14 @@ public class RegisterUserUseCase {
             Consumer<String> debugLogger
     ) {
         this.plugin = plugin;
+        this.configProvider = configProvider;
         this.codeService = codeService;
         this.userDao = userDao;
         this.authmeService = authmeService;
         this.captchaService = captchaService;
         this.questionnaireService = questionnaireService;
         this.discordService = discordService;
+        this.featureFlagService = featureFlagService;
         this.registrationApplicationService = registrationApplicationService;
         this.questionnaireSubmissionStore = questionnaireSubmissionStore;
         this.emailDomainWhitelistProvider = emailDomainWhitelistProvider;
@@ -87,7 +95,7 @@ public class RegisterUserUseCase {
         boolean manualReviewRequired = questionnaireSubmissionRecord != null && questionnaireSubmissionRecord.manualReviewRequired();
         boolean questionnairePassed = questionnaireSubmissionRecord != null && questionnaireSubmissionRecord.passed();
         boolean scoringServiceUnavailable = questionnaireSubmissionRecord != null && questionnaireSubmissionRecord.scoringServiceUnavailable();
-        boolean registerAutoApprove = plugin.getConfig().getBoolean("register.auto_approve", false);
+        boolean registerAutoApprove = configProvider.current().registerAutoApprove();
 
         RegistrationApplicationService.DecisionCommand decisionCommand = new RegistrationApplicationService.DecisionCommand(
                 true,
@@ -151,10 +159,10 @@ public class RegisterUserUseCase {
         if (request.email().isEmpty() || request.code().isEmpty() || request.uuid().isEmpty()) {
             throw UseCaseFailureException.business("REGISTER_REQUIRED_FIELDS", "register.required");
         }
-        if (plugin.getConfig().getBoolean("email_alias_limit_enabled", false) && request.email().contains("+")) {
+        if (configProvider.current().auth().emailAliasLimitEnabled() && request.email().contains("+")) {
             throw UseCaseFailureException.business("REGISTER_ALIAS_NOT_ALLOWED", "register.alias_not_allowed");
         }
-        if (plugin.getConfig().getBoolean("email_domain_whitelist_enabled", false)) {
+        if (configProvider.current().auth().emailDomainWhitelistEnabled()) {
             String domain = request.email().contains("@") ? request.email().substring(request.email().indexOf('@') + 1) : "";
             if (!emailDomainWhitelistProvider.get().contains(domain)) {
                 throw UseCaseFailureException.business("REGISTER_DOMAIN_NOT_ALLOWED", "register.domain_not_allowed");
@@ -171,7 +179,7 @@ public class RegisterUserUseCase {
             throw UseCaseFailureException.business("REGISTER_USERNAME_CASE_CONFLICT", "username.case_conflict");
         }
 
-        int maxAccounts = plugin.getConfig().getInt("max_accounts_per_email", 2);
+        int maxAccounts = configProvider.current().maxAccountsPerEmail();
         int emailCount = userDao.countUsersByEmail(request.email());
         if (emailCount >= maxAccounts) {
             throw UseCaseFailureException.business("REGISTER_EMAIL_LIMIT", "register.email_limit");
@@ -189,7 +197,7 @@ public class RegisterUserUseCase {
 
     private RegistrationProcessingHandler.QuestionnaireSubmissionRecord validateQuestionnaireSubmission(RegistrationRequest request, String requestId) {
         logRegistrationStage(requestId, "validate_questionnaire_submission", null);
-        if (!questionnaireService.isEnabled()) {
+        if (!featureFlagService.isQuestionnaireEnabled()) {
             return null;
         }
 
@@ -228,7 +236,7 @@ public class RegisterUserUseCase {
 
     private void validateVerificationMethod(RegistrationRequest request, String requestId) {
         logRegistrationStage(requestId, "validate_verification_method", null);
-        List<String> authMethods = plugin.getConfig().getStringList("auth_methods");
+        List<String> authMethods = configProvider.raw().getStringList("auth_methods");
         boolean useCaptcha = authMethods.contains("captcha");
         boolean useEmail = authMethods.contains("email");
 
@@ -250,7 +258,7 @@ public class RegisterUserUseCase {
 
     private void validateDiscordRequirement(RegistrationRequest request, String requestId) {
         logRegistrationStage(requestId, "validate_discord_requirement", null);
-        if (discordService.isRequired() && !discordService.isLinked(request.normalizedUsername())) {
+        if (featureFlagService.isDiscordRequired() && !discordService.isLinked(request.normalizedUsername())) {
             throw UseCaseFailureException.business("DISCORD_REQUIRED", "discord.required", new JSONObject().put("discord_required", true));
         }
     }

@@ -4,16 +4,16 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import java.io.IOException;
 import java.util.function.BiFunction;
-import org.bukkit.plugin.Plugin;
+import team.kitemc.verifymc.application.config.ConfigProvider;
 import org.json.JSONObject;
 
 public class AdminUserOperationHandler {
-    private final Plugin plugin;
+    private final ConfigProvider configProvider;
     private final WebAuthHelper authHelper;
     private final BiFunction<String, String, String> messageResolver;
 
-    public AdminUserOperationHandler(Plugin plugin, WebAuthHelper authHelper, BiFunction<String, String, String> messageResolver) {
-        this.plugin = plugin;
+    public AdminUserOperationHandler(ConfigProvider configProvider, WebAuthHelper authHelper, BiFunction<String, String, String> messageResolver) {
+        this.configProvider = configProvider;
         this.authHelper = authHelper;
         this.messageResolver = messageResolver;
     }
@@ -27,7 +27,7 @@ public class AdminUserOperationHandler {
             String password = req.optString("password");
             String language = req.optString("language", "en");
 
-            String adminPassword = plugin.getConfig().getString("admin.password", "");
+            String adminPassword = configProvider.current().auth().adminPassword();
             JSONObject resp = new JSONObject();
             if (password.equals(adminPassword)) {
                 resp.put("success", true);
